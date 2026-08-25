@@ -1,159 +1,135 @@
-![Isaac Lab](docs/source/_static/isaaclab.jpg)
+# Sheet RL — pulling a deformable sheet out of a slot
 
----
+<p align="center">
+  <img src="media/one.gif" alt="Franka Panda pulling a cloth sheet out of a slot" width="100%">
+</p>
 
-# Isaac Lab 3.0.0 Beta 2
+A Franka Panda learns to pinch the free edge of a cloth sheet standing upright in a narrow slot and
+draw it straight up and clear. Built on [Isaac Lab](https://github.com/isaac-sim/IsaacLab) as a
+standalone extension — the scene, robot and manager framework are inherited; the task is not.
 
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-6.0.1-silver.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
-[![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://docs.python.org/3/whatsnew/3.12.html)
-[![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
-[![Windows platform](https://img.shields.io/badge/platform-windows--64-orange.svg)](https://www.microsoft.com/en-us/)
-[![pre-commit](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/pre-commit.yaml?logo=pre-commit&logoColor=white&label=pre-commit&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/pre-commit.yaml)
-[![docs status](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/docs.yaml?label=docs&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/docs.yaml)
-[![License](https://img.shields.io/badge/license-BSD--3-yellow.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![License](https://img.shields.io/badge/license-Apache--2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
+**Task id:** `Template-Sheet-Rl-v0`  ·  **RL library:** rsl-rl (PPO)  ·  **Physics:** Newton / MJWarp with a VBD cloth solver
 
+## The task
 
-This is the stable release branch for Isaac Lab 3.0.0 Beta 2 and supports
-Isaac Sim 6.0.0 and 6.0.1. Use the
-[`v3.0.0-beta2.patch1`](https://github.com/isaac-sim/IsaacLab/tree/v3.0.0-beta2.patch1)
-tag for a reproducible release checkout. Active feature development continues
-on the [`develop`](https://github.com/isaac-sim/IsaacLab/tree/develop) branch.
+Two thin walls 1 cm apart hold a 20 × 20 cm sheet upright, with about 5 cm projecting above them.
+That projecting strip is the point of the slot: a free edge, held vertical and presented side-on, is
+far easier to pinch than a sheet lying flat with nothing to get a finger under. Slot and sheet are
+placed together at reset with a shared offset and yaw drawn over ±90°, and a mannequin arm is
+mirrored to the opposite side of the table.
 
+Success is the sheet's *lowest* node clearing the wall tops by 2 cm while the gripper is holding it —
+measured on the lowest node so the whole sheet is out, not merely tilted out.
 
-**Isaac Lab** is a GPU-accelerated, open-source framework designed to unify and simplify robotics research workflows,
-such as reinforcement learning, imitation learning, and motion planning. Built on [NVIDIA Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html),
-it combines fast and accurate physics and sensor simulation, making it an ideal choice for sim-to-real
-transfer in robotics.
+## Reward
 
-Isaac Lab provides developers with a range of essential features for accurate sensor simulation, such as RTX-based
-cameras, LIDAR, or contact sensors. The framework's GPU acceleration enables users to run complex simulations and
-computations faster, which is key for iterative processes like reinforcement learning and data-intensive tasks.
-Moreover, Isaac Lab can run locally or be distributed across the cloud, offering flexibility for large-scale deployments.
+Two dense terms shape the approach, two one-shot terms pay for the outcome, and the rest are charges.
 
-A detailed description of Isaac Lab can be found in our [arXiv paper](https://arxiv.org/abs/2511.04831).
+| term | what it pays for |
+|---|---|
+| `approach` | fingertips to the middle of the sheet's top edge, on two `tanh` scales so the pull is felt from across the table and again at the grasp |
+| `alignment` | hand pointing down and the closing axis square across the slot |
+| `square_progress` | the *change* in squareness — potential-based, so it pays for turning the wrist rather than for having turned it, and cannot be farmed |
+| `grasp_stage` | one-shot bonuses for the first grasp on the top edge and for extraction; charges for closing on nothing and for letting go early |
+| `lift_progress` | potential-based climb from the grasp up to the extraction bonus, gated on actually holding |
+| `table_clearance` | a slope pushing back against drifting into the table |
+| `gripper_recommit` | every gripper closure after the first, counted on the commanded bit rather than the measured width |
+| `ee_speed` | hand speed above 0.2 m/s, exponential to 9.52 at 1 m/s then flat (off unless `--slow`) |
 
-## Key Features
+A grasp is judged by whether cloth is actually between the pads — fingers shut with a sheet node
+inside `capture_radius` — not by the pose the gripper struck. Pose gates were tried and rejected a
+hand-flown grasp that plainly worked; `alignment` still encourages the posture, it just cannot veto
+a grasp that succeeded.
 
-Isaac Lab offers a comprehensive set of tools and environments designed to facilitate robot learning:
+## Setup
 
-- **Robots**: A diverse collection of robots, from manipulators, quadrupeds, to humanoids, with more than 16 commonly available models.
-- **Environments**: Ready-to-train implementations of more than 30 environments, which can be trained with popular reinforcement learning frameworks such as RSL RL, SKRL, RL Games, or Stable Baselines. We also support multi-agent reinforcement learning.
-- **Physics**: Rigid bodies, articulated systems, deformable objects
-- **Sensors**: RGB/depth/segmentation cameras, camera annotations, IMU, contact sensors, ray casters.
-
-
-## Getting Started
-
-### Documentation
-
-Our [documentation page](https://isaac-sim.github.io/IsaacLab) provides everything you need to get started, including
-detailed tutorials and step-by-step guides. Follow these links to learn more about:
-
-- [Installation steps](https://isaac-sim.github.io/IsaacLab/v3.0.0-beta2/source/setup/installation/index.html#local-installation)
-- [Reinforcement learning](https://isaac-sim.github.io/IsaacLab/v3.0.0-beta2/source/overview/reinforcement-learning/rl_existing_scripts.html)
-- [Tutorials](https://isaac-sim.github.io/IsaacLab/v3.0.0-beta2/source/tutorials/index.html)
-- [Available environments](https://isaac-sim.github.io/IsaacLab/v3.0.0-beta2/source/overview/environments.html)
-
-## Performance Dashboard
-
-We continuously benchmark Isaac Lab across different physics backends, renderers, and data types.
-The **[Isaac Lab Performance Dashboard](https://nvidia.github.io/omniperf/)** provides interactive
-charts showing preset comparison results, performance history, and environment scaling data from
-our internal CI/CD benchmarks.
-
-## Isaac Sim Version Dependency
-
-Isaac Lab is built on top of Isaac Sim and requires specific versions of Isaac Sim that are compatible with each
-release of Isaac Lab. Below, we outline the recent Isaac Lab releases and GitHub branches and their corresponding
-dependency versions for Isaac Sim.
-
-| Isaac Lab Version             | Isaac Sim Version         |
-| ----------------------------- | ------------------------- |
-| `release/3.0.0-beta2` branch  | Isaac Sim 6.0.0 / 6.0.1   |
-| `develop` branch              | Isaac Sim 6.0.0 / 6.0.1   |
-| `main` branch                 | Isaac Sim 4.5 / 5.0 / 5.1 |
-| `v3.0.0*`                     | Isaac Sim 6.0.0 / 6.0.1   |
-| `v2.3.X`                      | Isaac Sim 4.5 / 5.0 / 5.1 |
-| `v2.2.X`                      | Isaac Sim 4.5 / 5.0       |
-| `v2.1.X`                      | Isaac Sim 4.5             |
-| `v2.0.X`                      | Isaac Sim 4.5             |
-
-## Contributing to Isaac Lab
-
-We wholeheartedly welcome contributions from the community to make this framework mature and useful for everyone.
-These may happen as bug reports, feature requests, or code contributions. For details, please check our
-[contribution guidelines](https://isaac-sim.github.io/IsaacLab/v3.0.0-beta2/source/refs/contributing.html).
-
-## Show & Tell: Share Your Inspiration
-
-We encourage you to utilize our [Show & Tell](https://github.com/isaac-sim/IsaacLab/discussions/categories/show-and-tell)
-area in the `Discussions` section of this repository. This space is designed for you to:
-
-* Share the tutorials you've created
-* Showcase your learning content
-* Present exciting projects you've developed
-
-By sharing your work, you'll inspire others and contribute to the collective knowledge
-of our community. Your contributions can spark new ideas and collaborations, fostering
-innovation in robotics and simulation.
-
-## Troubleshooting
-
-Please see the [troubleshooting](https://isaac-sim.github.io/IsaacLab/v3.0.0-beta2/source/refs/troubleshooting.html) section for
-common fixes or [submit an issue](https://github.com/isaac-sim/IsaacLab/issues).
-
-For issues related to Isaac Sim, we recommend checking its [documentation](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
-or opening a question on its [forums](https://forums.developer.nvidia.com/c/agx-autonomous-machines/isaac/67).
-
-## Support
-
-* Please use GitHub [Discussions](https://github.com/isaac-sim/IsaacLab/discussions) for discussing ideas,
-  asking questions, and requests for new features.
-* Github [Issues](https://github.com/isaac-sim/IsaacLab/issues) should only be used to track executable pieces of
-  work with a definite scope and a clear deliverable. These can be fixing bugs, documentation issues, new features,
-  or general updates.
-
-## Connect with the NVIDIA Omniverse Community
-
-Do you have a project or resource you'd like to share more widely? We'd love to hear from you!
-Reach out to the NVIDIA Omniverse Community team at OmniverseCommunity@nvidia.com to explore opportunities
-to spotlight your work.
-
-You can also join the conversation on the [Omniverse Discord](https://discord.com/invite/nvidiaomniverse) to
-connect with other developers, share your projects, and help grow a vibrant, collaborative ecosystem
-where creativity and technology intersect. Your contributions can make a meaningful impact on the Isaac Lab
-community and beyond!
-
-## License
-
-The Isaac Lab framework is released under [BSD-3 License](LICENSE). The `isaaclab_mimic` extension and its
-corresponding standalone scripts are released under [Apache 2.0](LICENSE-mimic). The license files of its
-dependencies and assets are present in the [`docs/licenses`](docs/licenses) directory.
-
-Note that full-featured workflows (PhysX, RTX rendering, ROS, URDF/MJCF importers) require
-[Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html), which includes
-components under proprietary licensing terms. Kit-less Newton workflows do not require Isaac Sim.
-Please see the [Isaac Sim license](docs/licenses/dependencies/isaacsim-license.txt) for details.
-
-Note that the `isaaclab_mimic` extension requires cuRobo, which has proprietary licensing terms that can be found in [`docs/licenses/dependencies/cuRobo-license.txt`](docs/licenses/dependencies/cuRobo-license.txt).
-
-
-## Citation
-
-If you use Isaac Lab in your research, please cite the technical report:
-
-```
-@article{mittal2025isaaclab,
-  title={Isaac Lab: A GPU-Accelerated Simulation Framework for Multi-Modal Robot Learning},
-  author={Mayank Mittal and Pascal Roth and James Tigue and Antoine Richard and Octi Zhang and Peter Du and Antonio Serrano-Muñoz and Xinjie Yao and René Zurbrügg and Nikita Rudin and Lukasz Wawrzyniak and Milad Rakhsha and Alain Denzler and Eric Heiden and Ales Borovicka and Ossama Ahmed and Iretiayo Akinola and Abrar Anwar and Mark T. Carlson and Ji Yuan Feng and Animesh Garg and Renato Gasoto and Lionel Gulich and Yijie Guo and M. Gussert and Alex Hansen and Mihir Kulkarni and Chenran Li and Wei Liu and Viktor Makoviychuk and Grzegorz Malczyk and Hammad Mazhar and Masoud Moghani and Adithyavairavan Murali and Michael Noseworthy and Alexander Poddubny and Nathan Ratliff and Welf Rehberg and Clemens Schwarke and Ritvik Singh and James Latham Smith and Bingjie Tang and Ruchik Thaker and Matthew Trepte and Karl Van Wyk and Fangzhou Yu and Alex Millane and Vikram Ramasamy and Remo Steiner and Sangeeta Subramanian and Clemens Volk and CY Chen and Neel Jawale and Ashwin Varghese Kuruttukulam and Michael A. Lin and Ajay Mandlekar and Karsten Patzwaldt and John Welsh and Huihua Zhao and Fatima Anes and Jean-Francois Lafleche and Nicolas Moënne-Loccoz and Soowan Park and Rob Stepinski and Dirk Van Gelder and Chris Amevor and Jan Carius and Jumyung Chang and Anka He Chen and Pablo de Heras Ciechomski and Gilles Daviet and Mohammad Mohajerani and Julia von Muralt and Viktor Reutskyy and Michael Sauter and Simon Schirm and Eric L. Shi and Pierre Terdiman and Kenny Vilella and Tobias Widmer and Gordon Yeoman and Tiffany Chen and Sergey Grizan and Cathy Li and Lotus Li and Connor Smith and Rafael Wiltz and Kostas Alexis and Yan Chang and David Chu and Linxi "Jim" Fan and Farbod Farshidian and Ankur Handa and Spencer Huang and Marco Hutter and Yashraj Narang and Soha Pouya and Shiwei Sheng and Yuke Zhu and Miles Macklin and Adam Moravanszky and Philipp Reist and Yunrong Guo and David Hoeller and Gavriel State},
-  journal={arXiv preprint arXiv:2511.04831},
-  year={2025},
-  url={https://arxiv.org/abs/2511.04831}
-}
+```bash
+python -m pip install -e source/sheet_rl
+python scripts/list_envs.py          # confirms the task registered
 ```
 
-## Acknowledgement
+Requires a Python interpreter with Isaac Lab installed. See the
+[Isaac Lab installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
 
-Isaac Lab development initiated from the [Orbit](https://isaac-orbit.github.io/) framework.
-We gratefully acknowledge the authors of Orbit for their foundational contributions.
+## Running
+
+**Train**
+
+```bash
+python scripts/train.py --rl_library rsl_rl --task Template-Sheet-Rl-v0 --num_envs 1024 \
+  agent.run_name=grasp_v1 agent.experiment_name=sheet_grasp \
+  agent.max_iterations=3000 agent.num_steps_per_env=24 \
+  agent.actor.hidden_dims=[256,128,64] agent.critic.hidden_dims=[256,128,64] \
+  agent.actor.obs_normalization=true agent.critic.obs_normalization=true \
+  agent.clip_actions=2.4 agent.algorithm.learning_rate=3.0e-4 agent.save_interval=20
+```
+
+Add `--slow` to arm the hand-speed charge, which trades a slower arm for a lower return.
+
+To resume, add `--resume --load_run <run-dir> --checkpoint model_<n>.pt` and repeat every
+`agent.*` override — the checkpoint stores weights and optimizer state, not configuration.
+`max_iterations` is *additive* from the loaded iteration, not a target.
+
+**Watch**
+
+```bash
+python scripts/play.py --rl_library rsl_rl --task Template-Sheet-Rl-v0 --viz newton_gl \
+  --checkpoint logs/rsl_rl/sheet_grasp/<run>/model_<n>.pt \
+  agent.actor.hidden_dims=[256,128,64] agent.critic.hidden_dims=[256,128,64] \
+  agent.actor.obs_normalization=true agent.critic.obs_normalization=true agent.clip_actions=2.4 \
+  --lite
+```
+
+`--lite` is one environment at wall-clock speed — a watching tool rather than a sampling one, and
+cheap enough to sit alongside a training run.
+
+**Measure how fast the arm actually moves**
+
+```bash
+python scripts/eval_joint_speed.py --task Template-Sheet-Rl-v0 --num_envs 16 --headless \
+  --checkpoint logs/rsl_rl/sheet_grasp/<run>/model_<n>.pt --steps 600 \
+  agent.actor.hidden_dims=[256,128,64] agent.critic.hidden_dims=[256,128,64] \
+  agent.actor.obs_normalization=true agent.critic.obs_normalization=true agent.clip_actions=2.4
+```
+
+Prints per-joint and end-effector speed percentiles and writes `joint_speed.png` beside the
+checkpoint. Capping `arm_action.scale` sets how fast the arm *may* move; this says how fast it
+chooses to.
+
+**Fly it by hand**
+
+```bash
+python scripts/teleop_keyboard.py --free_run
+```
+
+Same scene the policy trains on, with the reward printed live per term.
+
+## Reading the logs
+
+`Episode_Reward/*` is the episodic sum divided by `max_episode_length_s` (**16.65 s**), so multiply
+by 16.65 to get the real per-episode value. `Events/*` are per-episode means of the grasp
+diagnostics, published on reset.
+
+After resuming, ignore `Mean reward` for the first ~25 iterations: `init_at_random_ep_len`
+randomises episode phase, so the statistics buffer fills with truncated stubs and reads far below
+the policy's actual performance. Wait for `Mean episode length` to recover before judging anything.
+
+## Layout
+
+```
+scripts/                     train, play, teleop, joint-speed evaluation
+source/sheet_rl/.../sheet_rl/
+├── sheet_rl_env_cfg.py      scene, actions, rewards, terminations, events, commands
+├── agents/                  PPO hyperparameters
+└── mdp/                     rewards, terminations, observations, events, commands
+```
+
+## Pinned against
+
+This task subclasses Isaac Lab internals (`FrankaClothEnvCfg`, `isaaclab_tasks.core.lift.mdp`,
+Newton's articulation data), so upstream changes can break it. Developed against:
+
+| | version |
+|---|---|
+| Isaac Lab | `68d7f932d` (`perf-2026-07-06-389-g68d7f932d`) |
+| rsl-rl-lib | `5.4.1` |
