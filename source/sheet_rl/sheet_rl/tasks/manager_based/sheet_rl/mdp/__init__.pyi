@@ -16,6 +16,8 @@ __all__ = [
     "drape_failure_penalty",
     "table_drop_penalty",
     "gripper_closed_near_band",
+    "timeout_still_gripping",
+    "closed_over_finished_drape",
     "drape_complete",
     "sheet_dropped_on_table",
     "sheet_key_points",
@@ -55,6 +57,7 @@ from .rewards import (
     drape_milestones,
     gripper_closed_near_band,
     band_coverage,
+    closed_over_finished_drape,
     ee_speed_penalty,
     ee_table_clearance,
     grasp_alignment,
@@ -68,5 +71,6 @@ from .rewards import (
     sheet_lift_progress,
     squareness_progress,
     table_drop_penalty,
+    timeout_still_gripping,
     top_edge_distance,
 )

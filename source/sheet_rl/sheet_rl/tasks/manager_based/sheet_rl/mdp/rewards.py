@@ -229,6 +229,7 @@ def goal_com_proximity(
     min_reward: float = 1.0,
     max_distance: float = 0.15,
     gate_on_phase: bool = True,
+    stop_coverage: float | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
     arm_cfg: SceneEntityCfg = SceneEntityCfg("mannequin_arm"),
 ) -> torch.Tensor:
@@ -271,6 +272,13 @@ def goal_com_proximity(
         gate_on_phase: Pay nothing until the sheet has been pulled clear of the slot. Load-bearing:
             a randomised reset can leave the sheet's slot within 15 cm of the arm, so without the
             gate the term would pay for a sheet that is still standing where it spawned.
+        stop_coverage: Stop paying once the band is covered this far, or ``None`` to pay throughout.
+            Also load-bearing. The centre of mass sits on the goal point *precisely* when the drape
+            is finished, so an ungated term goes on paying its maximum for exactly the state the
+            task wants the policy to leave -- stacking with ``drape_coverage`` on the same state and
+            between them out-earning the charge for holding on. This term's job is to pull the
+            sheet to the band; once it is there, later terms decide what happens next. Set equal to
+            the success threshold, so it stops paying where those terms take over.
         asset_cfg: The deformable sheet.
         arm_cfg: The mannequin arm.
     """
@@ -281,6 +289,8 @@ def goal_com_proximity(
     reward = (max_reward - slope * distance) * (distance < max_distance).float()
     if gate_on_phase:
         reward = reward * _phase_reached(env).float()
+    if stop_coverage is not None:
+        reward = reward * (_last_coverage(env) < stop_coverage).float()
     return reward / env.step_dt
 
 
@@ -1148,13 +1158,23 @@ class release_stage_reward(ManagerTermBase):
     shaping for that is :func:`band_center_distance`; this term handles the single discrete act
     that finishes it, the opening of the gripper.
 
-    Two outcomes, told apart by nothing more than how high the end-effector was:
+    Two outcomes:
 
-    * **released below** :paramref:`release_height` -- paid :paramref:`release_bonus` scaled by how
-      well the sheet is placed at that instant, so the bonus is worth taking only once the cloth is
-      actually over the band. Once per episode: re-closing and re-opening does not pay again.
-    * **released above it** -- charged :paramref:`high_release_penalty` and the episode ends, via
-      the flag the matching termination reads.
+    * **a placement** -- the band is already covered past :paramref:`success_coverage`, *or* the
+      end-effector is below :paramref:`release_height`. Paid :paramref:`release_bonus` scaled by
+      how well the sheet is placed at that instant, so the bonus is worth taking only once the
+      cloth is actually over the band. Once per episode: re-closing and re-opening does not pay
+      again.
+    * **a drop** -- the band is not covered *and* the hand is above the ceiling. Charged
+      :paramref:`high_release_penalty`.
+
+    Coverage is checked first, and that ordering is the whole point. Height alone cannot tell a
+    drape from a drop: the hand holding the free edge of a 0.2 m sheet laid over an arm whose top
+    surface is at 0.08 m sits above any ceiling tight enough to catch a genuine drop. A height-only
+    test therefore prices every release a correctly-draping policy can physically make as a
+    failure, and the observed result was a policy that spent 45% of each episode with the drape
+    finished and the gripper shut, paying to hold rather than 300 to let go. Coverage is the
+    evidence the height was always standing in for.
 
     Judged on the *commanded* bit rather than on the measured finger width, for the reason
     :class:`gripper_recommit_penalty` sets out at length: the gripper is one binary channel driven
@@ -1163,15 +1183,18 @@ class release_stage_reward(ManagerTermBase):
 
     Armed only while the sheet is held, which is what keeps the ceiling from firing on an empty
     gripper. Without that, an arm that legitimately let the sheet down and then lifted clear would
-    be charged 800 for the act of leaving.
+    be charged for the act of leaving.
 
     Note:
         Height is the end-effector frame -- ``panda_hand`` plus the 0.1034 m grasp offset, the same
         frame the IK controller drives and ``ee_table_clearance`` measures -- taken relative to the
-        environment origin. The arm's top surface sits at about 0.08 m, so a ceiling of 0.1 leaves
-        the policy roughly the last two centimetres of the descent to open in. That is a tight
-        window on purpose; loosen :paramref:`release_height` before concluding the drape is
-        unlearnable.
+        environment origin. It now decides the outcome only for a release made with the band still
+        uncovered, which is the case the ceiling was written for: letting go of a sheet that is not
+        yet on the arm, from a height, and hoping.
+
+    Note:
+        Reads the coverage fraction :func:`band_coverage` publishes, so that term must be declared
+        before this one or the value is a step stale.
 
     Note:
         Payouts are divided by ``step_dt`` so the configured magnitudes are the literal one-shot
@@ -1188,8 +1211,13 @@ class release_stage_reward(ManagerTermBase):
         action_term_name: Action term carrying the binary gripper channel.
         std: Distance over which the placement quality scaling the bonus decays by a factor of e
             [m]. Kept equal to the dense term's scale so the two agree on what "close" means.
-        release_height: End-effector height above which opening the gripper is a drop [m].
-        release_bonus: Paid for a release below that height, times placement quality [reward].
+        release_height: End-effector height above which opening the gripper is a drop [m] -- but
+            only when the band is not already covered; see :paramref:`success_coverage`.
+        success_coverage: Coverage fraction at or above which a release counts as a placement
+            whatever the hand's height. Keep equal to :class:`drape_milestones`' own threshold, so
+            "the drape is done" means one thing in the term that scores it and the term that prices
+            letting go of it.
+        release_bonus: Paid for a release that is not a drop, times placement quality [reward].
         high_release_penalty: Charged for a release above it [reward].
     """
 
@@ -1246,6 +1274,7 @@ class release_stage_reward(ManagerTermBase):
         action_term_name: str = "gripper_action",
         std: float = 0.2,
         release_height: float = 0.1,
+        success_coverage: float = 0.2,
         release_bonus: float = 500.0,
         high_release_penalty: float = 800.0,
     ) -> torch.Tensor:
@@ -1265,7 +1294,15 @@ class release_stage_reward(ManagerTermBase):
 
         # only a hand that had the sheet can let go of it
         opening = self._was_holding & phase & is_open
-        dropped = opening & (height > release_height)
+        # A release is a *drop* only if the sheet is not already on the band. Height alone cannot
+        # tell the two apart: to drape a 0.2 m sheet over an arm whose top surface is at 0.08, the
+        # hand holding the free edge sits well above any ceiling tight enough to catch a real drop,
+        # so a height-only test marks every release a correctly-draping policy can physically make
+        # as a failure -- which is the one action the task needs. Coverage is the direct evidence
+        # the height was standing in for: if the cloth is already spread over the region, opening
+        # the hand finishes the task from wherever the hand happens to be.
+        uncovered = _last_coverage(env) < success_coverage
+        dropped = opening & uncovered & (height > release_height)
         placed = opening & ~dropped & ~self._released
 
         reward = release_bonus * placement * placed.float() - high_release_penalty * dropped.float()
@@ -1724,6 +1761,154 @@ class band_approach_progress(ManagerTermBase):
         self._best = torch.maximum(self._best, closeness)
 
         return gain * max_reward / env.step_dt
+
+
+class timeout_still_gripping(ManagerTermBase):
+    """Charge levied when the clock runs out with the gripper still commanded shut.
+
+    The end state the task has no other answer for. Every other failure names something the policy
+    *did* -- dropped the sheet, dug at the slot walls, let go from height -- but running out the
+    clock still holding the sheet is a failure of omission, and until now it cost only the 1100
+    ``drape_failure`` charges on any ending whatever. That priced never letting go the same as
+    trying and missing, which is the wrong way round: a policy that carries the sheet to the band
+    and holds it there has solved everything except the one act the task is named for.
+
+    Judged on the *commanded* bit rather than the measured finger width, for the reason
+    :class:`gripper_recommit_penalty` lays out: the gripper channel is one raw Gaussian sample
+    thresholded into open/shut, so the command is the decision the policy controls and the width is
+    a lagging shadow of it. The threshold and its sign are read off the action term itself, so the
+    two cannot come to disagree about which side means open.
+
+    Fires only on a time-out, not on every ending. The other terminations already charge for what
+    went wrong in their own terms, and a policy that opened the gripper and then ended some other
+    way is not the behaviour this is aimed at.
+
+    Note:
+        Reads ``env.termination_manager.time_outs``, which is current rather than a step stale:
+        :meth:`ManagerBasedRLEnv.step` computes terminations *before* rewards. Same ordering
+        :class:`drape_failure_penalty` relies on.
+
+    Note:
+        Charged *on top of* :class:`drape_failure_penalty`, whose 1100 lands on the same step
+        whenever the sheet also finished away from the band.
+
+    Note:
+        Divided by ``step_dt`` so :paramref:`penalty` is the literal one-shot amount.
+
+    Args:
+        env: The environment.
+        penalty: Charged when the episode times out with the gripper commanded shut [reward].
+        action_term_name: Action term carrying the binary gripper channel.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        action_term = env.action_manager.get_term(cfg.params.get("action_term_name", "gripper_action"))
+        self._action_term = action_term
+        self._threshold = float(action_term.cfg.threshold)
+        self._positive = bool(action_term.cfg.positive_threshold)
+        # whether the episode that just ended timed out still gripping. Logged on reset, and the
+        # direct counterpart to ``Events/release``.
+        self._charged = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        extras["Events/timeout_gripping"] = self._charged[env_ids].float().mean()
+        self._charged[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        penalty: float = 6000.0,
+        action_term_name: str = "gripper_action",
+    ) -> torch.Tensor:
+        raw = self._action_term.raw_actions[:, 0]
+        is_open = raw > self._threshold if self._positive else raw < self._threshold
+
+        # current, not stale: terminations are computed before rewards within a step
+        charged = env.termination_manager.time_outs & ~is_open
+        self._charged |= charged
+        return -penalty * charged.float() / env.step_dt
+
+
+class closed_over_finished_drape(ManagerTermBase):
+    """Per-step charge for holding on when letting go is the only thing left to do.
+
+    The state this bills is precisely "success, but for the gripper": the sheet is out of the slot
+    and already covering the band past the bar :class:`drape_milestones` scores, and the single
+    condition still unmet is that the hand has not opened. Every step in that state is a step the
+    settling second cannot start, so the charge is a clock on the last remaining decision.
+
+    Distinct from :class:`gripper_closed_near_band`, which charges 1 a step on mere *proximity* --
+    the sheet's centre inside a 15 cm sphere. That one starts the clock on arriving; this one starts
+    a much louder clock on having already finished. A policy can sit inside the sphere with the
+    cloth balled up and owe only the small charge; it can only owe this one by having produced a
+    drape that would score if it opened its hand.
+
+    Judged on the commanded bit, as asked and as the neighbouring terms do, with the threshold and
+    sign read off the action term.
+
+    Note:
+        :paramref:`require_holding` additionally requires the grasp test to agree that the cloth is
+        actually between the pads, and defaults on. Without it the term bills a *succeeding*
+        episode: the success condition turns on :func:`_is_holding`, not on the raw command, so a
+        policy that has released the sheet and then re-commands the channel shut over a finished
+        drape is charged every step of a settling second that is going to pay out anyway. Set it
+        false to charge on the raw command alone.
+
+    Note:
+        Reads the coverage fraction :func:`band_coverage` publishes, so that term must be declared
+        before this one or the value is a step stale.
+
+    Note:
+        Divided by ``step_dt`` so :paramref:`penalty` is the literal per-step charge; the weight
+        carries the sign.
+
+    Args:
+        env: The environment.
+        success_coverage: Coverage fraction that counts as a finished drape. Keep equal to
+            :class:`drape_milestones`' own threshold, or the two disagree about what "finished"
+            means and the charge fires in states that could never have scored.
+        penalty: Charged per step spent in that state [reward].
+        require_holding: Also require the grasp test to confirm the cloth is in the pads.
+        action_term_name: Action term carrying the binary gripper channel.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        action_term = env.action_manager.get_term(cfg.params.get("action_term_name", "gripper_action"))
+        self._action_term = action_term
+        self._threshold = float(action_term.cfg.threshold)
+        self._positive = bool(action_term.cfg.positive_threshold)
+        # steps spent one gripper command away from scoring, logged on reset
+        self._blocked_steps = torch.zeros(env.num_envs, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        extras["Events/blocked_by_gripper_steps"] = self._blocked_steps[env_ids].mean()
+        self._blocked_steps[env_ids] = 0.0
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        success_coverage: float = 0.2,
+        penalty: float = 20.0,
+        require_holding: bool = True,
+        action_term_name: str = "gripper_action",
+    ) -> torch.Tensor:
+        raw = self._action_term.raw_actions[:, 0]
+        is_open = raw > self._threshold if self._positive else raw < self._threshold
+
+        charged = _phase_reached(env) & (_last_coverage(env) >= success_coverage) & ~is_open
+        if require_holding:
+            charged = charged & _is_holding(env)
+
+        self._blocked_steps += charged.float()
+        return penalty * charged.float() / env.step_dt
 
 
 class gripper_closed_near_band(ManagerTermBase):
