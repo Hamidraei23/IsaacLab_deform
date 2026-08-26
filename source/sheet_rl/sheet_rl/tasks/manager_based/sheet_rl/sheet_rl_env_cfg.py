@@ -56,9 +56,11 @@ from .mdp import (
     band_coverage,
     grasp_stage_reward,
     gripper_recommit_penalty,
+
+    release_stage_reward,
     released_before_extraction,
+    released_too_high,
     reset_arm_and_sheet,
-    sheet_extracted,
     sheet_key_points,
     sheet_lift_progress,
     squareness_progress,
@@ -407,14 +409,25 @@ class SheetEventCfg:
 
 @configclass
 class SheetRewardsCfg:
-    """Pick the sheet out of the slot. Nothing else is scored.
+    """Two phases, switched by one latch, with no reward paid in both.
 
-    Cut back to the single skill the policy has to acquire first: come down over the sheet, take
-    the middle of its top edge, and draw it straight up out of the slot. The draping objective and
-    its shaping are gone -- they were unreachable while the grasp itself was unsolved, and their
-    presence made every diagnostic harder to read.
+    **Phase one -- pick.** Come down over the sheet, take the middle of its top edge, and draw it
+    straight up out of the slot. ``approach``, ``alignment``, ``square_progress`` and
+    ``lift_progress`` shape it; ``grasp_stage`` pays for the grasp and the extraction.
 
-    Two dense terms shape the approach, two one-shot terms pay for the outcome.
+    **Phase two -- drape.** Latched the instant the sheet clears the walls, which is where phase
+    one's terms stop paying and where the episode used to end. ``drape_closeness`` pulls the
+    sheet's centre onto the centre of the red band, and ``release_stage`` pays for opening the
+    gripper over it -- or charges for dropping it from height.
+
+    Every phase-one term carries a ``phase_one_only`` gate rather than being left to run. Two of
+    them actively fight the drape -- ``alignment`` and ``square_progress`` pay for a wrist held
+    square to the *slot*, which is the opposite of what laying cloth over an arm needs -- and the
+    other two would pay a near-constant offset for the rest of the episode, diluting the only
+    signal phase two has.
+
+    ``table_clearance``, ``ee_speed`` and ``gripper_recommit`` are ungated on purpose: they are
+    safety and regularisation, not task shaping, and they mean the same thing in both phases.
     """
 
     # -- getting into position
@@ -426,6 +439,9 @@ class SheetRewardsCfg:
             "coarse_std": 0.4,
             # comparable to the grasp radius, for positioning once it has arrived
             "fine_std": 0.05,
+            # off once the sheet is out: the gripper is holding the top edge by then, so the term
+            # is pinned near 1 and would pay a flat offset for the whole drape
+            "phase_one_only": True,
             "asset_cfg": SceneEntityCfg("deformable"),
         },
         weight=3.0,
@@ -442,6 +458,9 @@ class SheetRewardsCfg:
             # All of it goes to squareness. Pointing down sits at 0.90 and is not what the policy
             # still has to learn, so an even split was spending half the term on a solved axis.
             "downward_frac": 0.0,
+            # off once the sheet is out. "Square to the slot" is a phase-one posture; the drape
+            # needs the wrist somewhere else entirely, and paying for both at once is a tug of war.
+            "phase_one_only": True,
             "asset_cfg": SceneEntityCfg("deformable"),
             "slot_cfg": SceneEntityCfg("slot_neg_y"),
         },
@@ -463,6 +482,9 @@ class SheetRewardsCfg:
             "slot_cfg": SceneEntityCfg("slot_neg_y"),
             # the whole payout for going from fully skew to fully square, not a per-step rate
             "max_reward": 300.0,
+            # goes quiet in phase two rather than being zeroed, so the correction already earned is
+            # kept instead of being clawed back in one spike on the step the sheet comes out
+            "phase_one_only": True,
         },
         # the term divides by dt internally, so the magnitude above is the literal payout
         weight=1.0,
@@ -571,20 +593,72 @@ class SheetRewardsCfg:
         weight=1.0,
     )
 
+    # -- phase two: drape the sheet on the red band
+    #
+    # ``exp(-d / std)`` on the distance from the sheet's centre of mass to the centre of the red
+    # region, and nothing until the sheet is clear of the slot. Exponential rather than the tanh
+    # the rest of the file uses because this one has to carry the sheet across a third of a metre:
+    # tanh's tail is flat enough there that a centimetre of progress is invisible next to the
+    # policy's own action noise, while an exponential's slope is a constant *fraction* of its
+    # value, so it never goes numerically dead however far away the sheet starts.
+    drape_closeness = RewTerm(
+        func=band_center_distance,
+        params={
+            "command_name": "deformable_pose",
+            "std": 0.2,
+            "gate_on_phase": True,
+            "asset_cfg": SceneEntityCfg("deformable"),
+            "arm_cfg": SceneEntityCfg("mannequin_arm"),
+        },
+        weight=60.0,
+    )
+
+    # The act that finishes the task, and the one that can ruin it. Opening the gripper below
+    # ``release_height`` is paid in proportion to how well the sheet is placed; opening it above is
+    # charged 800 and ends the episode. Judged on the commanded bit, like ``gripper_recommit``.
+    release_stage = RewTerm(
+        func=release_stage_reward,
+        params={
+            "command_name": "deformable_pose",
+            "asset_cfg": SceneEntityCfg("deformable"),
+            "robot_cfg": SceneEntityCfg("robot"),
+            "arm_cfg": SceneEntityCfg("mannequin_arm"),
+            "hand_body_name": "panda_hand",
+            # same scale the dense term uses, so the two agree on what "close" means
+            "std": 0.2,
+            # end-effector height, relative to the environment origin. The arm's top surface is at
+            # about 0.08, so this is roughly the last two centimetres of the descent -- tight on
+            # purpose, and the first number to loosen if the drape stalls with the sheet held.
+            "release_height": 0.1,
+            # Scaled by placement quality, so it is only worth taking once the sheet is over the
+            # band. NOT part of the brief: without something paid for letting go, holding a
+            # well-placed sheet forever scores exactly as well as draping it, and the policy has no
+            # reason to ever open the gripper. Set to 0.0 to score the drape on closeness alone.
+            "release_bonus": 500.0,
+            "high_release_penalty": 800.0,
+        },
+        # the term divides by dt internally, so both magnitudes above are literal one-shot returns
+        weight=1.0,
+    )
+
 
 @configclass
 class SheetTerminationsCfg(TerminationsCfg):
-    """The inherited bounds, plus the two ways of botching the pick.
+    """The inherited bounds, plus the three ways of throwing the episode away.
 
-    Both end the episode rather than only costing reward: once the single scored grasp attempt has
-    been thrown away, nothing the policy does for the remaining steps can retrieve the episode, and
-    the samples are better spent on a fresh one.
+    Every one of them ends the episode rather than only costing reward, and for the same reason:
+    each puts the sheet somewhere nothing the policy does afterwards can retrieve, so the remaining
+    steps are better spent on a fresh episode.
+
+    Extraction is conspicuously *not* here any more. Pulling the sheet clear of the slot used to be
+    the task and ended the episode on the spot; it is now the boundary between the two phases, and
+    the episode carries straight on into the drape.
     """
 
-    # success: the sheet is out of the slot, which is the whole task now
-    extracted = DoneTerm(func=sheet_extracted)
-
     released_early = DoneTerm(func=released_before_extraction)
+
+    # phase two's counterpart: the sheet is out, but it was dropped rather than laid down
+    released_high = DoneTerm(func=released_too_high)
 
     finger_touched_slot = DoneTerm(
         func=finger_in_slot,

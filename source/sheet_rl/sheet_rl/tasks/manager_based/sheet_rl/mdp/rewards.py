@@ -34,6 +34,7 @@ _PHASE_ATTR = "_sheet_placement_phase"
 _COVERAGE_ATTR = "_sheet_band_coverage"
 _HOLDING_ATTR = "_sheet_holding"
 _EARLY_RELEASE_ATTR = "_sheet_early_release"
+_HIGH_RELEASE_ATTR = "_sheet_high_release"
 _DEBUG_ATTR = "_sheet_debug"
 
 
@@ -63,6 +64,23 @@ def _early_release(env: ManagerBasedRLEnv) -> torch.Tensor:
     if state is None:
         state = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         setattr(env, _EARLY_RELEASE_ATTR, state)
+    return state
+
+
+def _high_release(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Per-environment flag: was the sheet dropped from above the release ceiling?
+
+    Phase two's counterpart to :func:`_early_release`, and it shares that flag's one-step lag. Set
+    by :class:`release_stage_reward`, which also charges the penalty on the correct step, and read
+    by the matching termination term on the *following* one -- :meth:`ManagerBasedRLEnv.step`
+    computes terminations before rewards, so a flag written during reward computation is not seen
+    until the next step. The charge lands on time; the episode ends 33 ms later. Nothing depends on
+    the difference, but do not read the surrounding comments as a guarantee that it is current.
+    """
+    state = getattr(env, _HIGH_RELEASE_ATTR, None)
+    if state is None:
+        state = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        setattr(env, _HIGH_RELEASE_ATTR, state)
     return state
 
 
@@ -232,32 +250,50 @@ def band_coverage(
 def band_center_distance(
     env: ManagerBasedRLEnv,
     command_name: str,
-    std: float = 0.1,
+    std: float = 0.2,
     gate_on_phase: bool = True,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
     arm_cfg: SceneEntityCfg = SceneEntityCfg("mannequin_arm"),
 ) -> torch.Tensor:
-    """Shaped reward for the sheet's centre sitting on the centre of the red region.
+    """Phase two's objective: ``exp(-d / std)`` for the sheet's centre on the red band's centre.
 
-    Complements :func:`band_coverage`, which is indifferent to *which* part of the sheet does the
-    covering: a sheet draped by its corner can cover the band as well as one draped by its middle.
-    This term asks for the sheet to be centred on the region, which is what leaves margin on all
-    sides.
+    ``d`` is the distance from the sheet's centre of mass to the centre of the red region painted
+    on the mannequin arm, so the term is one when the sheet is draped squarely over the band and
+    decays smoothly with every centimetre it sits away from it.
+
+    Exponential rather than the ``tanh`` this term used to be, and the difference is not cosmetic.
+    ``tanh`` has a flat tail: at the third of a metre the sheet hangs from once it is clear of the
+    slot, a 0.1 m scale leaves a slope of about 1e-4 per metre, so closing a centimetre earns
+    nothing a policy can distinguish from its own action noise -- the same failure the approach
+    shaping documents having hit. ``exp(-d/std)`` has a constant *relative* slope: every centimetre
+    closer is worth a fixed fraction more than the last, whatever the range. There is no distance
+    at which the term goes numerically dead.
+
+    :paramref:`std` is the distance over which the reward falls by a factor of e. At 0.2 m the
+    sheet earns about 0.14 while it is still a full 40 cm away and 0.9 once its centre is within a
+    centimetre, which spans the whole carry.
+
+    Note:
+        A perfectly draped sheet does not reach exactly one. The band centre sits on the arm's
+        *axis*, and cloth lying over a 4 cm capsule has its centre of mass a couple of centimetres
+        above that -- about 0.9 at ``std`` 0.2. That is deliberate: the target is a point the sheet
+        can only approach by wrapping the arm rather than one it can sit on.
 
     Args:
         env: The environment.
         command_name: Command term carrying the band's offset along the arm.
-        std: Distance scale of the shaping [m].
-        gate_on_phase: Pay nothing until the sheet has been pulled clear of the slot. Without the
-            gate this term is largest at the *start* of the episode, when the sheet stands a short
-            hop from the arm, and would reward never picking it up at all.
+        std: Distance over which the reward decays by a factor of e [m].
+        gate_on_phase: Pay nothing until the sheet has been pulled clear of the slot. This is what
+            makes the drape a second phase. Without the gate the term is largest at the *start* of
+            the episode, when the sheet stands a short hop from the arm, and would reward never
+            picking it up at all.
         asset_cfg: The deformable sheet.
         arm_cfg: The mannequin arm.
     """
     sheet: DeformableObject = env.scene[asset_cfg.name]
     center, _ = _band_frame(env, command_name, arm_cfg)
     distance = torch.norm(center - sheet.data.root_pos_w.torch, dim=-1)
-    reward = 1.0 - torch.tanh(distance / std)
+    reward = torch.exp(-distance / std)
     if gate_on_phase:
         reward = reward * _phase_reached(env).float()
     return reward
@@ -300,6 +336,7 @@ def top_edge_distance(
     resolution: tuple[int, int],
     coarse_std: float = 0.4,
     fine_std: float = 0.05,
+    phase_one_only: bool = True,
     hand_body_name: str = "panda_hand",
     grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.1034),
     asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
@@ -326,6 +363,9 @@ def top_edge_distance(
         coarse_std: Distance scale of the travel term [m]. Should be comparable to how far the
             gripper starts from the sheet, or it saturates before it can pull.
         fine_std: Distance scale of the placement term [m]. Comparable to the grasp radius.
+        phase_one_only: Stop paying once the sheet is clear of the slot. The gripper is holding the
+            top edge by then, so the term would otherwise pay a near-constant ~1 per step for the
+            whole of phase two -- a flat offset that buys nothing and dilutes the drape shaping.
         hand_body_name: Body the grasp frame hangs off.
         grasp_offset: Grasp frame offset in the hand's frame [m].
         asset_cfg: The deformable sheet.
@@ -335,9 +375,12 @@ def top_edge_distance(
     tip, _ = _grasp_site(env, robot_cfg, hand_body_name, grasp_offset)
     center = _top_edge_nodes(sheet.data.nodal_pos_w.torch, resolution).mean(dim=1)
     distance = (tip - center).norm(dim=-1)
-    return 0.5 * (1.0 - torch.tanh(distance / coarse_std)) + 0.5 * (
+    reward = 0.5 * (1.0 - torch.tanh(distance / coarse_std)) + 0.5 * (
         1.0 - torch.tanh(distance / fine_std)
     )
+    if phase_one_only:
+        reward = reward * (~_phase_reached(env)).float()
+    return reward
 
 
 def ee_table_clearance(
@@ -426,6 +469,7 @@ def grasp_alignment(
     resolution: tuple[int, int],
     std: float = 0.1,
     downward_frac: float = 0.5,
+    phase_one_only: bool = True,
     hand_body_name: str = "panda_hand",
     left_finger_body_name: str = "panda_leftfinger",
     right_finger_body_name: str = "panda_rightfinger",
@@ -461,6 +505,10 @@ def grasp_alignment(
         std: Distance scale of the proximity gate [m].
         downward_frac: Share of the term given to pointing down, in [0, 1]. The remainder goes to
             being square to the slot. At 0 the term pays for squareness alone.
+        phase_one_only: Stop paying once the sheet is clear of the slot. Not optional in practice:
+            the posture this term asks for is defined against the *slot*, and phase two needs the
+            wrist free to turn wherever the drape requires. Left on, it pays the policy to carry
+            the sheet to the arm still holding its grasping pose.
         hand_body_name: Body the grasp frame hangs off.
         left_finger_body_name: Left fingertip body.
         right_finger_body_name: Right fingertip body.
@@ -490,7 +538,10 @@ def grasp_alignment(
         robot.body_names.index(right_finger_body_name),
     )
 
-    return proximity * (downward_frac * downward + (1.0 - downward_frac) * square)
+    reward = proximity * (downward_frac * downward + (1.0 - downward_frac) * square)
+    if phase_one_only:
+        reward = reward * (~_phase_reached(env)).float()
+    return reward
 
 
 class squareness_progress(ManagerTermBase):
@@ -523,6 +574,8 @@ class squareness_progress(ManagerTermBase):
         env: The environment.
         max_reward: Total paid for going from fully skew to fully square [reward]. Signed: losing
             the alignment again refunds it.
+        phase_one_only: Stop paying once the sheet is clear of the slot. "Square to the slot" is
+            meaningless for the drape, and the wrist has to turn a long way to lay the sheet down.
         left_finger_body_name: Left fingertip body.
         right_finger_body_name: Right fingertip body.
         robot_cfg: The robot.
@@ -554,11 +607,18 @@ class squareness_progress(ManagerTermBase):
         left_finger_body_name: str = "panda_leftfinger",
         right_finger_body_name: str = "panda_rightfinger",
         max_reward: float = 300.0,
+        phase_one_only: bool = True,
     ) -> torch.Tensor:
         square = _closing_squareness(self._robot, self._slot, self._left_id, self._right_id)
         delta = torch.where(self._fresh, torch.zeros_like(square), square - self._prev)
         self._prev = square
         self._fresh[:] = False
+        # Quiet in phase two, the same way the lift shaping is: the potential simply stops being
+        # paid out and everything already earned is kept. Not driven to zero -- that would claw the
+        # whole correction back in one spike on the step the sheet comes out of the slot, which is
+        # the last thing the extraction should be followed by.
+        if phase_one_only:
+            delta = delta * (~_phase_reached(env)).float()
         # divided by step_dt so max_reward is the literal total for a full correction, matching the
         # convention the other payouts in this file use
         return delta * max_reward / env.step_dt
@@ -635,11 +695,12 @@ class gripper_recommit_penalty(ManagerTermBase):
 
 
 def sheet_extracted(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """The task's success condition: the sheet has been pulled clear of the slot.
+    """Phase one's completion condition: the sheet has been pulled clear of the slot.
 
-    Reads the latch :class:`grasp_stage_reward` sets, so the reward and the termination cannot
-    disagree about what counts as success. The reward manager runs before the termination manager
-    inside a step, so the episode ends on the very step the sheet comes out.
+    Reads the latch :class:`grasp_stage_reward` sets. Wired as a termination while extraction was
+    the whole task; now that the drape follows it, the episode carries straight on and this is left
+    as the published boundary between the two phases -- available as an observation or a diagnostic
+    without ending anything.
     """
     return _phase_reached(env)
 
@@ -966,4 +1027,146 @@ class grasp_stage_reward(ManagerTermBase):
 
         # undo the manager's dt scaling so the configured magnitudes are the real one-shot returns
         # rather than being silently divided by the 30 Hz timestep
+        return reward / env.step_dt
+
+
+class release_stage_reward(ManagerTermBase):
+    """Phase two's outcome: let the sheet go *onto* the band, never *at* it from height.
+
+    Phase one ends the moment the sheet clears the slot walls, and from that step the episode is
+    about one thing -- getting the cloth to lie on the red region and leaving it there. The dense
+    shaping for that is :func:`band_center_distance`; this term handles the single discrete act
+    that finishes it, the opening of the gripper.
+
+    Two outcomes, told apart by nothing more than how high the end-effector was:
+
+    * **released below** :paramref:`release_height` -- paid :paramref:`release_bonus` scaled by how
+      well the sheet is placed at that instant, so the bonus is worth taking only once the cloth is
+      actually over the band. Once per episode: re-closing and re-opening does not pay again.
+    * **released above it** -- charged :paramref:`high_release_penalty` and the episode ends, via
+      the flag the matching termination reads.
+
+    Judged on the *commanded* bit rather than on the measured finger width, for the reason
+    :class:`gripper_recommit_penalty` sets out at length: the gripper is one binary channel driven
+    by the sign of a Gaussian sample, so the command is what the policy controls and the width is a
+    lagging, smoothed shadow of it. Charging the command charges the decision.
+
+    Armed only while the sheet is held, which is what keeps the ceiling from firing on an empty
+    gripper. Without that, an arm that legitimately let the sheet down and then lifted clear would
+    be charged 800 for the act of leaving.
+
+    Note:
+        Height is the end-effector frame -- ``panda_hand`` plus the 0.1034 m grasp offset, the same
+        frame the IK controller drives and ``ee_table_clearance`` measures -- taken relative to the
+        environment origin. The arm's top surface sits at about 0.08 m, so a ceiling of 0.1 leaves
+        the policy roughly the last two centimetres of the descent to open in. That is a tight
+        window on purpose; loosen :paramref:`release_height` before concluding the drape is
+        unlearnable.
+
+    Note:
+        Payouts are divided by ``step_dt`` so the configured magnitudes are the literal one-shot
+        returns, matching the convention the rest of this file uses.
+
+    Args:
+        env: The environment.
+        command_name: Command term carrying the band's offset along the arm.
+        asset_cfg: The deformable sheet.
+        robot_cfg: The robot.
+        arm_cfg: The mannequin arm.
+        hand_body_name: Body the end-effector frame hangs off.
+        grasp_offset: End-effector frame offset in the hand's frame [m].
+        action_term_name: Action term carrying the binary gripper channel.
+        std: Distance over which the placement quality scaling the bonus decays by a factor of e
+            [m]. Kept equal to the dense term's scale so the two agree on what "close" means.
+        release_height: End-effector height above which opening the gripper is a drop [m].
+        release_bonus: Paid for a release below that height, times placement quality [reward].
+        high_release_penalty: Charged for a release above it [reward].
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        params = cfg.params
+        self._sheet: DeformableObject = env.scene[params["asset_cfg"].name]
+        self._robot: Articulation = env.scene[params["robot_cfg"].name]
+        self._hand_id = self._robot.body_names.index(params.get("hand_body_name", "panda_hand"))
+
+        action_term = env.action_manager.get_term(params.get("action_term_name", "gripper_action"))
+        self._action_term = action_term
+        # read off the action term rather than restated here, so the two cannot come to disagree
+        # about which sign of the channel means open
+        self._threshold = float(action_term.cfg.threshold)
+        self._positive = bool(action_term.cfg.positive_threshold)
+
+        zeros = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        # last step's hold, so the release is caught on the step the command flips rather than
+        # several steps later once the fingers have finished travelling
+        self._was_holding = zeros.clone()
+        self._released = zeros.clone()
+
+        self._counts = {
+            name: torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
+            for name in ("release", "high_release")
+        }
+        # best placement the episode ever reached, logged on reset. Without it "never draped" and
+        # "draped well but never let go" are both a zero release count.
+        self._best_placement = torch.zeros(env.num_envs, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        for name, counter in self._counts.items():
+            extras[f"Events/{name}"] = counter[env_ids].float().mean()
+            counter[env_ids] = 0
+        extras["Events/best_placement"] = self._best_placement[env_ids].mean()
+        self._best_placement[env_ids] = 0.0
+        self._was_holding[env_ids] = False
+        self._released[env_ids] = False
+        _high_release(self._env)[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        asset_cfg: SceneEntityCfg,
+        robot_cfg: SceneEntityCfg,
+        arm_cfg: SceneEntityCfg,
+        hand_body_name: str = "panda_hand",
+        grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.1034),
+        action_term_name: str = "gripper_action",
+        std: float = 0.2,
+        release_height: float = 0.1,
+        release_bonus: float = 500.0,
+        high_release_penalty: float = 800.0,
+    ) -> torch.Tensor:
+        pose = self._robot.data.body_link_pose_w.torch[:, self._hand_id]
+        offset = torch.tensor(grasp_offset, device=pose.device).expand(len(pose), 3)
+        tip = pose[:, :3] + quat_apply(pose[:, 3:7], offset)
+        # relative to the environment origin, which is where the table and the arm are defined
+        height = tip[:, 2] - env.scene.env_origins[:, 2]
+
+        center, _ = _band_frame(env, command_name, arm_cfg)
+        distance = (center - self._sheet.data.root_pos_w.torch).norm(dim=-1)
+        placement = torch.exp(-distance / std)
+
+        phase = _phase_reached(env)
+        raw = self._action_term.raw_actions[:, 0]
+        is_open = raw > self._threshold if self._positive else raw < self._threshold
+
+        # only a hand that had the sheet can let go of it
+        opening = self._was_holding & phase & is_open
+        dropped = opening & (height > release_height)
+        placed = opening & ~dropped & ~self._released
+
+        reward = release_bonus * placement * placed.float() - high_release_penalty * dropped.float()
+
+        # read by the matching termination, which is what actually ends the episode
+        _high_release(env).copy_(dropped)
+        self._released |= placed
+        # cloned: the flag is a single tensor the grasp term overwrites in place every step
+        self._was_holding = _is_holding(env).clone()
+        self._best_placement = torch.maximum(self._best_placement, placement * phase.float())
+        self._counts["release"] += placed
+        self._counts["high_release"] += dropped
+
         return reward / env.step_dt

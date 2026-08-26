@@ -14,7 +14,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply_inverse
 
-from .rewards import _early_release
+from .rewards import _early_release, _high_release
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, RigidObject
@@ -32,6 +32,27 @@ def released_before_extraction(env: ManagerBasedRLEnv) -> torch.Tensor:
     reward manager runs before the termination manager inside a step, so it is never stale.
     """
     return _early_release(env)
+
+
+def released_too_high(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """End the episode if the gripper is opened above the release ceiling in phase two.
+
+    Dropping the sheet from height is not a worse drape, it is a different episode: the cloth
+    lands wherever it falls, the placement reward that follows is decided by luck rather than by
+    anything the policy did, and nothing it does for the remaining steps can pick the sheet back
+    up. Ending on the spot, with the charge :class:`~.rewards.release_stage_reward` levies, keeps
+    that noise out of the return and spends the samples on a fresh episode instead.
+
+    A release *below* the ceiling deliberately does not end anything. The sheet is meant to stay on
+    the band, and leaving the episode running is what makes the placement shaping keep paying for
+    it -- so a drape that slides off the arm afterwards is worth less than one that settles.
+
+    The flag is set by :class:`~.rewards.release_stage_reward`, which also charges the penalty on
+    the step the gripper opens. This fires one step later: terminations are computed *before*
+    rewards inside a step, so the flag is read on the following one. A single extra frame of the
+    sheet falling is immaterial, but the lag is real.
+    """
+    return _high_release(env)
 
 
 def finger_in_slot(
