@@ -16,6 +16,11 @@ backend, whose rollout loop has no per-step hook to record from.
 Reports, per arm joint, the median, 95th percentile and maximum angular speed, alongside the
 end-effector's linear speed, and writes a three-panel plot next to the checkpoint.
 
+The same rollout also records what every reward term paid on every step, and writes a second figure
+beside the first. The two answer different questions about one run -- how the arm moved, and what it
+was paid for -- and recording both from a single rollout means they describe the *same* episodes
+rather than two runs that happened to be configured alike.
+
 Usage::
 
     python3 scripts/eval_joint_speed.py --task Template-Sheet-Rl-v0 --num_envs 16 --headless \
@@ -69,6 +74,12 @@ parser.add_argument("--seed", type=int, default=None, help="Seed used for the en
 parser.add_argument("--steps", type=int, default=600, help="Environment steps to record.")
 parser.add_argument("--warmup", type=int, default=30, help="Steps to discard before recording.")
 parser.add_argument("--out", type=str, default=None, help="Plot path. Defaults to beside the checkpoint.")
+parser.add_argument(
+    "--reward_out", type=str, default=None, help="Reward-term plot path. Defaults to beside the checkpoint."
+)
+parser.add_argument(
+    "--no_rewards", action="store_true", default=False, help="Skip recording and plotting the reward terms."
+)
 parser.add_argument(
     "--train_env_cfg", action="store_true", default=False, help="Use the training env config rather than play mode."
 )
@@ -142,6 +153,102 @@ def _plot(path, joint_speeds, ee_speed, names, dt, commanded_cap):
     plt.close(figure)
 
 
+def _plot_rewards(path, step_rewards, term_names, episode_ends, end_labels, dt):
+    """Write the reward-term figure.
+
+    Args:
+        path: Where to write the PNG.
+        step_rewards: ``(steps, num_envs, num_terms)`` of what each term actually added to the
+            return on each step -- already weighted and dt-scaled, so the numbers sum to the return.
+        term_names: One name per column of ``step_rewards``.
+        episode_ends: Step indices at which an episode ended.
+        end_labels: The termination term that fired at each of those indices.
+        dt: Control step [s].
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # averaged over environments: with one environment this is the episode itself, and with many it
+    # is the mean episode, which is the quantity the training curves are also drawn from
+    per_step = step_rewards.mean(dim=1)
+    cumulative = per_step.cumsum(dim=0)
+    totals = cumulative[-1]
+    time_axis = torch.arange(per_step.shape[0]) * dt
+
+    # A term that never paid anything is noise in a legend of sixteen. Ordered by how much they
+    # moved the return, so the terms that decide the run are the ones named first.
+    order = sorted(range(len(term_names)), key=lambda i: -abs(totals[i].item()))
+    shown = [i for i in order if abs(totals[i].item()) > 1e-6]
+    colors = plt.get_cmap("tab20")(torch.linspace(0, 1, max(len(shown), 1)).numpy())
+
+    figure, axes = plt.subplots(3, 1, figsize=(13, 15), constrained_layout=True)
+
+    axes[0].set_title("Cumulative reward by term (mean over environments)")
+    for color, index in zip(colors, shown):
+        axes[0].plot(time_axis, cumulative[:, index], linewidth=1.3, color=color, label=term_names[index])
+    axes[0].plot(time_axis, cumulative.sum(dim=1), linewidth=2.2, color="k", label="total")
+    axes[0].axhline(0.0, color="0.6", linewidth=0.8)
+    axes[0].set_xlabel("time [s]")
+    axes[0].set_ylabel("cumulative reward")
+    axes[0].legend(fontsize=7, ncol=3, loc="upper left")
+
+    # Symmetric log: the one-shots are thousands and the dense terms are single digits, so a linear
+    # axis shows the spikes and a flat line along zero. Symlog keeps the sign and stays linear
+    # within +/-1, which is where the per-step terms live.
+    axes[1].set_title("Per-step reward by term (symlog)")
+    for color, index in zip(colors, shown):
+        axes[1].plot(time_axis, per_step[:, index], linewidth=1.0, color=color, label=term_names[index])
+    axes[1].set_yscale("symlog", linthresh=1.0)
+    axes[1].axhline(0.0, color="0.6", linewidth=0.8)
+    axes[1].set_xlabel("time [s]")
+    axes[1].set_ylabel("reward this step")
+    axes[1].legend(fontsize=7, ncol=3)
+
+    # episode boundaries on both time-series panels, labelled with what ended them: a reward trace
+    # is unreadable without knowing where one attempt stopped and the next began
+    for axis in axes[:2]:
+        for step, label in zip(episode_ends, end_labels):
+            axis.axvline(step * dt, color="0.4", linestyle=":", linewidth=1.0)
+            axis.annotate(
+                label,
+                xy=(step * dt, axis.get_ylim()[1]),
+                fontsize=6,
+                rotation=90,
+                va="top",
+                ha="right",
+                color="0.3",
+            )
+
+    axes[2].set_title("Total contribution over the rollout")
+    # same filter the traces use: a row of zeros for a term that never fired reads as data
+    bar_order = sorted(shown, key=lambda i: totals[i].item())
+    values = [totals[i].item() for i in bar_order]
+    axes[2].barh(
+        range(len(bar_order)),
+        values,
+        color=["#c0504d" if value < 0 else "#4f81bd" for value in values],
+    )
+    axes[2].set_yticks(range(len(bar_order)), [term_names[i] for i in bar_order], fontsize=8)
+    axes[2].axvline(0.0, color="k", linewidth=0.8)
+    axes[2].set_xlabel("total reward over the rollout")
+    for position, value in enumerate(values):
+        axes[2].annotate(
+            f"{value:,.0f}",
+            xy=(value, position),
+            xytext=(4 if value >= 0 else -4, 0),
+            textcoords="offset points",
+            va="center",
+            ha="left" if value >= 0 else "right",
+            fontsize=7,
+        )
+    axes[2].margins(x=0.15)
+
+    figure.savefig(path, dpi=130)
+    plt.close(figure)
+
+
 @hydra_task_config(args_cli.task, args_cli.agent, play_mode=not args_cli.train_env_cfg)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Record joint speeds while the deterministic policy runs."""
@@ -194,7 +301,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO]: commanded cap = {scale:.4f} rad/step x {agent_cfg.clip_actions} / {dt:.4f} s"
                   f" = {cap:.3f} rad/s")
 
+        reward_manager = env.unwrapped.reward_manager
+        termination_manager = env.unwrapped.termination_manager
+        reward_names = list(reward_manager.active_terms)
+        done_names = list(termination_manager.active_terms)
+
         joint_speeds, ee_speeds = [], []
+        step_rewards, term_dones = [], []
         previous_hand = None
         obs = env.get_observations()
         with torch.inference_mode():
@@ -208,6 +321,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     # same thing whichever physics backend produced it
                     if previous_hand is not None:
                         ee_speeds.append(((hand - previous_hand).norm(dim=-1) / dt).clone())
+                    if not args_cli.no_rewards:
+                        # the manager stores each term as a *rate*; multiplying by dt undoes that
+                        # and gives what the term actually added to the return this step, so the
+                        # columns sum to the return rather than to 30 times it
+                        step_rewards.append(reward_manager._step_reward.clone() * dt)
+                        term_dones.append(termination_manager._term_dones.clone())
                 previous_hand = hand
 
         joint_speeds = torch.stack(joint_speeds).cpu()
@@ -225,6 +344,39 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         out = args_cli.out or os.path.join(os.path.dirname(resume_path), "joint_speed.png")
         _plot(out, joint_speeds, ee_speeds, arm_names, dt, cap)
         print(f"[INFO]: wrote {out}")
+
+        if not args_cli.no_rewards:
+            step_rewards = torch.stack(step_rewards).cpu()
+            term_dones = torch.stack(term_dones).cpu()
+
+            # which term ended each episode. Taken from environment 0: with several environments
+            # the endings interleave and a single timeline cannot honestly label them all.
+            ends, labels = [], []
+            for step_index, row in enumerate(term_dones[:, 0, :]):
+                fired = row.nonzero(as_tuple=True)[0]
+                if len(fired):
+                    ends.append(step_index)
+                    labels.append("+".join(done_names[i] for i in fired.tolist()))
+
+            totals = step_rewards.mean(dim=1).sum(dim=0)
+            episodes = max(len(ends), 1)
+            print(f"\n{'reward term':>22} {'total':>12} {'per episode':>12} {'per step':>10}")
+            for index in sorted(range(len(reward_names)), key=lambda i: -abs(totals[i].item())):
+                total = totals[index].item()
+                if abs(total) < 1e-6:
+                    continue
+                print(
+                    f"{reward_names[index]:>22} {total:>12,.1f} {total / episodes:>12,.1f}"
+                    f" {total / len(step_rewards):>10,.2f}"
+                )
+            net = totals.sum().item()
+            print(f"{'NET':>22} {net:>12,.1f} {net / episodes:>12,.1f} {net / len(step_rewards):>10,.2f}")
+            print(f"\n{len(ends)} episode(s) ended in env 0: {', '.join(labels) if labels else 'none'}")
+
+            reward_out = args_cli.reward_out or os.path.join(os.path.dirname(resume_path), "reward_terms.png")
+            _plot_rewards(reward_out, step_rewards, reward_names, ends, labels, dt)
+            print(f"[INFO]: wrote {reward_out}")
+
         env.close()
 
 

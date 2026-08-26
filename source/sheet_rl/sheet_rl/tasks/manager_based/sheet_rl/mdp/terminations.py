@@ -14,7 +14,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply_inverse
 
-from .rewards import _early_release, _high_release
+from .rewards import _drape_success, _early_release, _high_release, _table_drop
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, RigidObject
@@ -35,24 +35,68 @@ def released_before_extraction(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 
 def released_too_high(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """End the episode if the gripper is opened above the release ceiling in phase two.
+    """Whether the gripper was opened above the release ceiling in phase two.
 
-    Dropping the sheet from height is not a worse drape, it is a different episode: the cloth
-    lands wherever it falls, the placement reward that follows is decided by luck rather than by
-    anything the policy did, and nothing it does for the remaining steps can pick the sheet back
-    up. Ending on the spot, with the charge :class:`~.rewards.release_stage_reward` levies, keeps
-    that noise out of the return and spends the samples on a fresh episode instead.
+    Warning:
+        Not registered in :class:`~..sheet_rl_env_cfg.SheetTerminationsCfg`. A high release is
+        charged by :class:`~.rewards.release_stage_reward` and the episode carries on. Kept because
+        the flag it reads is still maintained and wiring it back is a one-line change, but nothing
+        calls this today.
 
-    A release *below* the ceiling deliberately does not end anything. The sheet is meant to stay on
-    the band, and leaving the episode running is what makes the placement shaping keep paying for
-    it -- so a drape that slides off the arm afterwards is worth less than one that settles.
+    The argument for ending here was that a sheet dropped from height lands wherever it falls, so
+    the placement reward that follows is decided by luck rather than by anything the policy did.
+    The argument against, which is the one in force, is that this cannot be known at the moment of
+    release: a sheet let go high over the band may still land on the arm, settle and be scored a
+    genuine success, and terminating on the release forecloses that before the physics has run. The
+    charge prices the risk taken; the outcome decides the rest.
 
-    The flag is set by :class:`~.rewards.release_stage_reward`, which also charges the penalty on
-    the step the gripper opens. This fires one step later: terminations are computed *before*
-    rewards inside a step, so the flag is read on the following one. A single extra frame of the
-    sheet falling is immaterial, but the lag is real.
+    The flag is set by :class:`~.rewards.release_stage_reward` on the step the gripper opens. Were
+    this wired, it would fire one step later -- terminations are computed *before* rewards inside a
+    step, so a flag written during reward computation is read on the following one.
     """
     return _high_release(env)
+
+
+def sheet_dropped_on_table(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Whether the sheet is lying on the table, out of the gripper and off the arm.
+
+    Warning:
+        Not registered in :class:`~..sheet_rl_env_cfg.SheetTerminationsCfg`. The drop is charged
+        once by :class:`~.rewards.table_drop_penalty` and the episode carries on to whatever ending
+        does arrive, which is normally the time-out and its ``drape_failure`` charge. Kept because
+        the latch it reads is still maintained and wiring it back is a one-line change, but nothing
+        calls this today.
+
+    The condition, the settling window and the penalty all belong to
+    :class:`~.rewards.table_drop_penalty`; this reads the latch it sets, one step later.
+    """
+    return _table_drop(env)
+
+
+def drape_complete(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """End the episode once the sheet has sat on the red band, covered, for a full second.
+
+    The task's only success condition, and the one termination here that is not a failure. The
+    cloth is off the gripper and on the arm and has stayed there; there is nothing further the
+    policy can do that the task asks for, so the remaining steps are better spent on a fresh
+    episode.
+
+    The second of settling is the substance of the test, not a formality. Coverage crossing the
+    success threshold is direction-blind -- a sheet sliding off the arm passes the bar going down
+    just as one settling onto it passes going up -- so ending the episode on the crossing would
+    score the two alike and hand out the bonus before the physics had said which had happened.
+    Nothing requires the robot to hold still during the wait, but a retraction that drags the cloth
+    shows up as coverage falling, which restarts the count.
+
+    Not flagged as a time-out, so the value function treats it as a true terminal state and does
+    not bootstrap past it. That is the correct reading: the episode is over because the goal was
+    met, not because the clock ran out.
+
+    The latch is set by :class:`~.rewards.drape_milestones`, which also pays the bonus. Because
+    terminations are computed before rewards inside a step, this fires the step after the drape is
+    judged complete -- the latch is held rather than momentary precisely so that lag is harmless.
+    """
+    return _drape_success(env)
 
 
 def finger_in_slot(

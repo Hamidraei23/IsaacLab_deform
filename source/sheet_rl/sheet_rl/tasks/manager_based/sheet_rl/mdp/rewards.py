@@ -35,6 +35,8 @@ _COVERAGE_ATTR = "_sheet_band_coverage"
 _HOLDING_ATTR = "_sheet_holding"
 _EARLY_RELEASE_ATTR = "_sheet_early_release"
 _HIGH_RELEASE_ATTR = "_sheet_high_release"
+_DRAPE_SUCCESS_ATTR = "_sheet_drape_success"
+_TABLE_DROP_ATTR = "_sheet_table_drop"
 _DEBUG_ATTR = "_sheet_debug"
 
 
@@ -81,6 +83,35 @@ def _high_release(env: ManagerBasedRLEnv) -> torch.Tensor:
     if state is None:
         state = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         setattr(env, _HIGH_RELEASE_ATTR, state)
+    return state
+
+
+def _drape_success(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Per-environment latch: has the sheet been left on the band, well enough to be done?
+
+    Set by :class:`drape_milestones` when the cloth is out of the gripper and covering the red
+    region past its success threshold, and read by the matching termination term. Latched rather
+    than momentary, so the episode still ends even though terminations are computed a step ahead of
+    rewards and the flag is therefore read one step after it is written.
+    """
+    state = getattr(env, _DRAPE_SUCCESS_ATTR, None)
+    if state is None:
+        state = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        setattr(env, _DRAPE_SUCCESS_ATTR, state)
+    return state
+
+
+def _table_drop(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Per-environment latch: has the sheet ended up flat on the table, clear of the arm?
+
+    Set by :class:`table_drop_penalty` and read by the matching termination term. Latched rather
+    than momentary for the usual reason: terminations are computed a step ahead of rewards, so a
+    flag written during reward computation is not read until the following step.
+    """
+    state = getattr(env, _TABLE_DROP_ATTR, None)
+    if state is None:
+        state = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        setattr(env, _TABLE_DROP_ATTR, state)
     return state
 
 
@@ -172,6 +203,85 @@ def _band_frame(
     center = arm_pos + quat_apply(arm_quat, command.band_offset_b)
     axis = quat_apply(arm_quat, axis_local)
     return center, axis
+
+
+def _goal_point(
+    env: ManagerBasedRLEnv, command_name: str, arm_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Return the goal point's world position -- the point the success visualiser measures against.
+
+    The band centre lifted off the arm's surface by the offset drawn at reset, which is roughly
+    where a draped sheet's centre of mass ends up. Built from the arm's live pose and the offset the
+    command stores, for the reason spelled out in :func:`_band_frame`: ``pose_command_w`` is
+    computed by the command manager, which runs *after* the reward manager within a step.
+    """
+    command = env.command_manager.get_term(command_name)
+    arm: RigidObject = env.scene[arm_cfg.name]
+    return arm.data.root_pos_w.torch + quat_apply(
+        arm.data.root_quat_w.torch, command.goal_offset_b
+    )
+
+
+def goal_com_proximity(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    max_reward: float = 15.0,
+    min_reward: float = 1.0,
+    max_distance: float = 0.15,
+    gate_on_phase: bool = True,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
+    arm_cfg: SceneEntityCfg = SceneEntityCfg("mannequin_arm"),
+) -> torch.Tensor:
+    """Per-step reward that falls off linearly with the sheet's distance from the goal point.
+
+    Pays :paramref:`max_reward` when the sheet's centre of mass sits on the goal point, falls
+    straight to :paramref:`min_reward` at :paramref:`max_distance`, and pays nothing beyond it. The
+    quantity measured is exactly the one the success visualiser tints the table on, so what the
+    viewer shows and what the policy is paid for are the same number.
+
+    Linear rather than the exponential the other distance terms use, and bounded rather than
+    asymptotic. An exponential never quite reaches zero, so it pays a little everywhere and its
+    gradient is steepest far from the target; a straight line inside a fixed radius puts the same
+    pull on every metre of the approach and is exactly zero outside, which keeps it from competing
+    with the phase-one shaping.
+
+    The step from zero to :paramref:`min_reward` at the boundary is deliberate, not an oversight in
+    the ramp. Crossing into the sphere is a real event -- it is the same radius ``drape_milestones``
+    pays its reach bonus for entering and ``drape_failure`` charges for ending outside -- and a
+    small discontinuity there marks it.
+
+    Warning:
+        This is a *level* reward, not a ratchet: it pays every step the sheet is close, for as long
+        as it is close. :class:`band_approach_progress` was deliberately built as a ratchet after a
+        level term of this shape became the largest single income in the task -- about 2,600 an
+        episode, 42% of all positive reward -- collected by hovering next to the arm rather than
+        finishing. At 15 a step this one is worth up to ~7,400 over the 500-step episode, which is
+        the same order as the 8,000 success bonus, and holding still collects it. See the comment
+        on the term in the environment config for what pushes back.
+
+    Note:
+        Divided by ``step_dt``, so the configured magnitudes are literal per-step amounts.
+
+    Args:
+        env: The environment.
+        command_name: Command term carrying the goal offset on the arm.
+        max_reward: Paid when the centre of mass is on the goal point [reward/step].
+        min_reward: Paid at exactly :paramref:`max_distance` [reward/step].
+        max_distance: Radius beyond which nothing is paid [m].
+        gate_on_phase: Pay nothing until the sheet has been pulled clear of the slot. Load-bearing:
+            a randomised reset can leave the sheet's slot within 15 cm of the arm, so without the
+            gate the term would pay for a sheet that is still standing where it spawned.
+        asset_cfg: The deformable sheet.
+        arm_cfg: The mannequin arm.
+    """
+    sheet: DeformableObject = env.scene[asset_cfg.name]
+    distance = (_goal_point(env, command_name, arm_cfg) - sheet.data.root_pos_w.torch).norm(dim=-1)
+
+    slope = (max_reward - min_reward) / max_distance
+    reward = (max_reward - slope * distance) * (distance < max_distance).float()
+    if gate_on_phase:
+        reward = reward * _phase_reached(env).float()
+    return reward / env.step_dt
 
 
 def band_coverage(
@@ -1170,3 +1280,528 @@ class release_stage_reward(ManagerTermBase):
         self._counts["high_release"] += dropped
 
         return reward / env.step_dt
+
+
+class drape_failure_penalty(ManagerTermBase):
+    """Charge levied on any episode that ends without the sheet on the red band.
+
+    The end of an episode is the only moment at which the task can be scored as done or not done,
+    and this is that score: on the step the episode ends, the sheet's centre of mass is either
+    inside a sphere of :paramref:`success_radius` around the centre of the red region or it is not.
+    If it is not, :paramref:`penalty` is charged.
+
+    Deliberately blind to *why* the episode ended. A time-out, a sheet flung out of bounds, a drop
+    from height -- all the same failure, because in every one of them the cloth finished somewhere
+    other than on the arm. Exempting time-outs in particular would be an open invitation to run out
+    the clock rather than attempt the drape.
+
+    Unlike everything else in phase two this is ungated: an episode that never even grasped the
+    sheet is charged exactly like one that carried it to within a hand's breadth and missed. That
+    is the point -- it prices the task's outcome, not its progress, and the dense terms are what
+    reward getting closer.
+
+    Note:
+        Reads ``env.termination_manager.dones`` directly, which is current rather than a step
+        stale: :meth:`ManagerBasedRLEnv.step` computes terminations *before* rewards. That is the
+        opposite of the ordering assumed by the flag-passing terms elsewhere in this file, which
+        publish a flag for a termination term to read on the following step.
+
+    Note:
+        The charge is divided by ``step_dt`` so :paramref:`penalty` is the literal one-shot amount,
+        matching the convention the other explicit magnitudes here use.
+
+    Args:
+        env: The environment.
+        command_name: Command term carrying the band's offset along the arm.
+        success_radius: How close the sheet's centre must finish to the band's centre to escape the
+            charge [m].
+        penalty: Charged when it does not [reward].
+        asset_cfg: The deformable sheet.
+        arm_cfg: The mannequin arm.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._sheet: DeformableObject = env.scene[cfg.params["asset_cfg"].name]
+        # whether the episode that just ended finished with the sheet on the band. Logged on
+        # reset, and the closest thing this task has to a headline success rate.
+        self._succeeded = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        extras["Events/drape_success"] = self._succeeded[env_ids].float().mean()
+        self._succeeded[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        asset_cfg: SceneEntityCfg,
+        arm_cfg: SceneEntityCfg,
+        success_radius: float = 0.15,
+        penalty: float = 1100.0,
+    ) -> torch.Tensor:
+        center, _ = _band_frame(env, command_name, arm_cfg)
+        distance = (center - self._sheet.data.root_pos_w.torch).norm(dim=-1)
+        on_band = distance < success_radius
+
+        # current, not stale: terminations are computed before rewards within a step
+        dones = env.termination_manager.dones
+        self._succeeded |= dones & on_band
+        return -penalty * (dones & ~on_band).float() / env.step_dt
+
+
+class table_drop_penalty(ManagerTermBase):
+    """Charge levied the moment the sheet is lying on the table, out of the gripper and off the arm.
+
+    The one failure phase two had no name for. ``released_high`` catches a sheet let go from above
+    the ceiling and ``released_early`` catches one dropped back into the slot, but a sheet that
+    simply slips out of a marginal grasp part-way through the carry, or slides off the arm after a
+    release that did not take, lands on the table and the episode carries on running for however
+    many steps are left. The inherited ``deformable_out_of_bounds`` does not catch it either: its
+    floor is at -0.02, and a sheet resting on the table sits comfortably inside every bound. Nothing
+    the policy does afterwards can pick it back up -- the grasp state machine pays one scored
+    closure per episode -- so those steps are spent on a run that has already ended in every sense
+    but the bookkeeping.
+
+    All four conditions have to hold together, and each is doing work:
+
+    * the phase latch, so this can only fire on a sheet that was pulled clear of the slot. Before
+      that the sheet is standing in its slot and ``released_early`` owns the failure.
+    * not held, judged on the same capture test :class:`grasp_stage_reward` uses, so a sheet that
+      slipped the pads counts exactly like one that was let go of deliberately. The brief says
+      "falls from the gripper" and slipping is the commoner way that happens.
+    * the sheet's *highest* node below :paramref:`table_height`. The highest, not the centre and not
+      the lowest: a sheet correctly draped over the arm has its lower edges resting on the table on
+      both sides, so a lowest-node or centroid test would read a good drape as a failure, while the
+      highest node of a draped sheet sits up at about twice the arm's radius.
+    * every node clear of the arm's surface by :paramref:`touch_margin`, measured against the
+      capsule properly rather than against the band. The band covers only the middle
+      ``TARGET_BAND_WIDTH`` of the arm, so a coverage test would call a sheet hanging off the
+      shoulder "not touching" and throw away an episode that is still live.
+
+    The last two overlap deliberately. Either alone would spare a good drape; requiring both means
+    the term fires only on a sheet that is unambiguously *down*, which is the side to err on --
+    a false positive kills an episode that could still have finished, and costs far more than a
+    late one does.
+
+    :paramref:`settle_steps` is the same caution in time. Cloth flaps, and a sheet swinging under
+    the gripper can dip below the threshold for a frame on the way past; the condition has to hold
+    for that many consecutive steps before anything fires.
+
+    Note:
+        The charge is levied once, on the step the streak completes, and the latch it sets is read
+        by the termination on the following step -- terminations are computed before rewards. The
+        sheet gains one more frame of lying still on the table, which changes nothing.
+
+    Note:
+        This is charged *on top of* :class:`drape_failure_penalty`, which fires on whichever step
+        the episode ends and is blind to why. A dropped sheet is well outside the success sphere,
+        so it pays both. That is the intent: the pair prices a sheet on the floor as strictly worse
+        than a sheet still in hand when the clock runs out, which the outcome charge alone cannot
+        say, since it scores the two identically.
+
+    Note:
+        Divided by ``step_dt`` so :paramref:`penalty` is the literal one-shot amount, matching the
+        convention the other explicit magnitudes here use.
+
+    Args:
+        env: The environment.
+        asset_cfg: The deformable sheet.
+        arm_cfg: The mannequin arm.
+        arm_radius: Radius of the arm capsule [m].
+        arm_length: Length of the capsule's cylindrical section, end caps excluded [m].
+        table_height: Height, above the environment origin, the sheet's highest node must fall
+            below to count as lying flat [m].
+        touch_margin: Clearance from the capsule's surface within which a node still counts as
+            touching the arm [m].
+        settle_steps: Consecutive steps every condition must hold before the term fires.
+        penalty: Charged once, when it does [reward].
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._sheet: DeformableObject = env.scene[cfg.params["asset_cfg"].name]
+        self._arm: RigidObject = env.scene[cfg.params["arm_cfg"].name]
+        self._streak = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
+        self._dropped = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        extras["Events/table_drop"] = self._dropped[env_ids].float().mean()
+        self._streak[env_ids] = 0
+        self._dropped[env_ids] = False
+        _table_drop(self._env)[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        asset_cfg: SceneEntityCfg,
+        arm_cfg: SceneEntityCfg,
+        arm_radius: float,
+        arm_length: float,
+        table_height: float = 0.03,
+        touch_margin: float = 0.01,
+        settle_steps: int = 5,
+        penalty: float = 500.0,
+    ) -> torch.Tensor:
+        nodes = self._sheet.data.nodal_pos_w.torch
+
+        # heights relative to the environment origin, which is where the table's surface is at zero
+        highest = nodes[..., 2].max(dim=1).values - env.scene.env_origins[:, 2]
+        flat = highest < table_height
+
+        # distance from the nearest node to the capsule's *surface*. Projecting onto the axis and
+        # clamping to the cylindrical section makes the rounded end caps fall out for free: past
+        # the clamp the closest point on the segment is the cap's centre, so the measurement
+        # becomes a sphere test, which is exactly what a cap is.
+        center = self._arm.data.root_pos_w.torch
+        unit_x = torch.tensor([1.0, 0.0, 0.0], device=nodes.device).expand(len(nodes), 3)
+        axis = quat_apply(self._arm.data.root_quat_w.torch, unit_x)
+        offset = nodes - center.unsqueeze(1)
+        along = (offset * axis.unsqueeze(1)).sum(-1).clamp(-0.5 * arm_length, 0.5 * arm_length)
+        radial = (offset - along.unsqueeze(-1) * axis.unsqueeze(1)).norm(dim=-1)
+        clear = (radial - arm_radius).min(dim=1).values > touch_margin
+
+        down = _phase_reached(env) & ~_is_holding(env) & flat & clear
+        # consecutive, not cumulative: a frame that fails any condition puts the count back to zero
+        self._streak = torch.where(down, self._streak + 1, torch.zeros_like(self._streak))
+
+        newly = (self._streak >= settle_steps) & ~self._dropped
+        self._dropped |= newly
+        # latched, so the termination still sees it on the following step
+        _table_drop(env).copy_(self._dropped)
+
+        return -penalty * newly.float() / env.step_dt
+
+
+class drape_milestones(ManagerTermBase):
+    """The three things that happen once, on the way to a finished drape.
+
+    The dense terms say "closer" and "more covered" on every step; none of them says "you have
+    arrived". These do, and each pays at most once per episode:
+
+    * :paramref:`reach_bonus` -- the sheet's centre of mass first enters a sphere of
+      :paramref:`reach_radius` around the centre of the red region. The same sphere
+      :class:`drape_failure_penalty` charges for missing, so the two are exactly complementary:
+      reaching it pays, ending outside it costs.
+    * :paramref:`touch_bonus` -- the sheet first covers *any* of the band at all, i.e. the coverage
+      fraction rises above :paramref:`touch_coverage`. With 35 surface samples the smallest
+      non-zero coverage is one sample, about 0.029, so this fires on genuine first contact rather
+      than on a near miss.
+    * :paramref:`success_bonus` -- the task is finished: the cloth has been out of the gripper *and*
+      covering at least :paramref:`success_coverage` of the region for :paramref:`dwell_steps`
+      consecutive steps. The latch this sets is what the success termination reads.
+
+    Success is deliberately tested as a *state* rather than as the release event. Cloth settles: a
+    sheet let go at 70% coverage may sag onto the band and pass 80% a few steps later, and that is
+    a success by any reading of the task. Keying on the instant of release would miss it, and would
+    also mean the quality of the drape was judged at the one moment it is most disturbed.
+
+    :paramref:`dwell_steps` is the other half of that argument. Settling cuts both ways: a sheet can
+    pass the coverage bar on its way *off* the arm just as easily as on its way onto it, and a
+    success declared the instant the bar is crossed cannot tell the two apart -- it ends the episode
+    before the physics has said which one happened, and pays 8000 for a drape that would have slid
+    onto the table half a second later. Requiring the state to hold for a full second after the
+    gripper opens is what makes the bonus a payment for a drape that *stays*. The counter is
+    consecutive: any step that breaks the condition -- coverage falling back under the bar, or the
+    gripper closing on the sheet again -- puts it back to zero, so the second cannot be accumulated
+    out of scattered good frames.
+
+    The dwell also prices leaving. Nothing forces the robot to hold still during it, but the arm
+    dragging the sheet as it retracts shows up immediately as coverage falling, which resets the
+    count -- so a clean withdrawal is rewarded and a careless one simply postpones the bonus until
+    the cloth settles again, if it ever does.
+
+    All three are gated on the phase latch, so nothing here can be collected by shoving the sheet
+    at the arm without ever picking it out of the slot.
+
+    Note:
+        Reads the coverage fraction :func:`band_coverage` publishes, so the term computing it must
+        be declared *before* this one or the value is a step stale.
+
+    Note:
+        Bonuses are divided by ``step_dt`` so the configured magnitudes are the literal one-shot
+        payouts.
+
+    Args:
+        env: The environment.
+        command_name: Command term carrying the band's offset along the arm.
+        asset_cfg: The deformable sheet.
+        arm_cfg: The mannequin arm.
+        reach_radius: Radius of the sphere around the band centre the sheet's centre must enter [m].
+        reach_bonus: Paid once, on entering it [reward].
+        touch_coverage: Coverage fraction that counts as first contact; anything strictly above it.
+        touch_bonus: Paid once, on first contact [reward].
+        success_coverage: Coverage fraction that counts as a finished drape, in [0, 1].
+        dwell_steps: Consecutive steps the out-of-gripper, covered state must hold before the drape
+            counts as finished.
+        success_bonus: Paid once, on finishing [reward].
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._sheet: DeformableObject = env.scene[cfg.params["asset_cfg"].name]
+        zeros = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._reached = zeros.clone()
+        self._touched = zeros.clone()
+        self._complete = zeros.clone()
+        self._counts = {
+            name: torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
+            for name in ("reached", "touched", "complete")
+        }
+        # best coverage the episode ever reached, logged on reset. The success threshold is a
+        # cliff; this is what says whether the policy is stalling just under it or nowhere near.
+        self._best_coverage = torch.zeros(env.num_envs, device=env.device)
+        # how far into the settling second the episode got. Its own diagnostic because the dwell is
+        # a second cliff behind the coverage one: a run whose best dwell sits just short of the
+        # requirement is losing drapes to slippage, which looks identical to never drape at all if
+        # only the completion count is watched.
+        self._dwell = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
+        self._best_dwell = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        for name, counter in self._counts.items():
+            extras[f"Events/{name}"] = counter[env_ids].float().mean()
+            counter[env_ids] = 0
+        extras["Events/best_coverage"] = self._best_coverage[env_ids].mean()
+        extras["Events/best_dwell"] = self._best_dwell[env_ids].float().mean()
+        self._best_coverage[env_ids] = 0.0
+        self._dwell[env_ids] = 0
+        self._best_dwell[env_ids] = 0
+        self._reached[env_ids] = False
+        self._touched[env_ids] = False
+        self._complete[env_ids] = False
+        _drape_success(self._env)[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        asset_cfg: SceneEntityCfg,
+        arm_cfg: SceneEntityCfg,
+        reach_radius: float = 0.15,
+        reach_bonus: float = 200.0,
+        touch_coverage: float = 0.0,
+        touch_bonus: float = 100.0,
+        success_coverage: float = 0.8,
+        dwell_steps: int = 30,
+        success_bonus: float = 500.0,
+    ) -> torch.Tensor:
+        phase = _phase_reached(env)
+        center, _ = _band_frame(env, command_name, arm_cfg)
+        distance = (center - self._sheet.data.root_pos_w.torch).norm(dim=-1)
+        # published by band_coverage earlier in this same step, ungated -- the phase gate is
+        # applied here instead, so all three milestones share one condition
+        coverage = _last_coverage(env)
+        holding = _is_holding(env)
+
+        reached = phase & (distance < reach_radius) & ~self._reached
+        touched = phase & (coverage > touch_coverage) & ~self._touched
+
+        # the drape as a state, and then the same state held. Consecutive: a step that breaks it --
+        # coverage slipping back under the bar, or the gripper taking hold of the sheet again --
+        # puts the count to zero rather than pausing it, so the second has to be one unbroken
+        # second of the sheet sitting on the arm by itself.
+        settled = phase & ~holding & (coverage >= success_coverage)
+        self._dwell = torch.where(settled, self._dwell + 1, torch.zeros_like(self._dwell))
+        self._best_dwell = torch.maximum(self._best_dwell, self._dwell)
+        complete = (self._dwell >= dwell_steps) & ~self._complete
+
+        reward = (
+            reach_bonus * reached.float()
+            + touch_bonus * touched.float()
+            + success_bonus * complete.float()
+        )
+
+        self._reached |= reached
+        self._touched |= touched
+        self._complete |= complete
+        # latched, so the termination still sees it on the following step
+        _drape_success(env).copy_(self._complete)
+        self._best_coverage = torch.maximum(self._best_coverage, coverage * phase.float())
+
+        self._counts["reached"] += reached
+        self._counts["touched"] += touched
+        self._counts["complete"] += complete
+
+        return reward / env.step_dt
+
+
+class band_approach_progress(ManagerTermBase):
+    """Ratcheted approach reward: pays only for closeness this episode has never reached before.
+
+    A level reward for being near the band pays the same amount on the five-hundredth step as on
+    the first, which makes parking next to the arm an annuity -- and one worth more than finishing
+    the task, since finishing ends the episode that pays it. This pays for *arriving* instead.
+
+    The episode keeps a high-water mark of ``exp(-d / std)``, and each step is paid only the amount
+    by which the current value exceeds it. Three consequences, and they are the whole point:
+
+    * **Holding still pays nothing.** The mark is already at the current value, so the excess is
+      zero however long the sheet is held there.
+    * **Backing off and returning pays nothing.** Retreating does not lower the mark, so the
+      ground reclaimed on the way back has already been paid for and is not paid again.
+    * **The episode total is bounded.** The increments telescope to
+      ``max_reward * (best_closeness - closeness_on_entering_phase_two)``, no matter how long the
+      episode runs or how many times the sheet moves. There is no quantity of steps that turns
+      into more reward.
+
+    Distinct from the potential-based shaping :class:`sheet_lift_progress` uses, and deliberately
+    so. That form pays the signed change, which refunds itself when the sheet falls back; this one
+    ratchets, so a setback is not charged. Cloth swings and settles on its own, and a signed
+    potential bills the policy for physics it did not choose. What it gives up is the pressure to
+    *stay* close -- and that is covered, by :class:`drape_failure_penalty` on the terminating step
+    and :class:`band_detach_penalty` on leaving the band.
+
+    Nothing is paid for the step phase two begins on. The mark is initialised to whatever closeness
+    the sheet happens to have when it clears the slot, so the reward measures ground gained during
+    the carry rather than handing out up to ``max_reward`` for the accident of where the sheet
+    ended up after extraction.
+
+    Note:
+        Divided by ``step_dt`` so :paramref:`max_reward` is the literal total for a full approach,
+        matching the convention the other payouts here use.
+
+    Args:
+        env: The environment.
+        command_name: Command term carrying the band's offset along the arm.
+        std: Distance over which closeness decays by a factor of e [m].
+        max_reward: Total paid for going from no closeness at all to sitting on the band centre.
+            The realistic ceiling is lower, since the mark starts wherever extraction leaves the
+            sheet -- typically around 0.13 of it.
+        asset_cfg: The deformable sheet.
+        arm_cfg: The mannequin arm.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._sheet: DeformableObject = env.scene[cfg.params["asset_cfg"].name]
+        self._best = torch.zeros(env.num_envs, device=env.device)
+        self._start = torch.zeros(env.num_envs, device=env.device)
+        # phase two has not begun, so there is no mark to measure against yet
+        self._fresh = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        # how much of the approach budget the episode actually collected, as a fraction. Says
+        # directly whether the carry is being completed or abandoned part-way.
+        extras["Events/approach_earned"] = (self._best[env_ids] - self._start[env_ids]).mean()
+        self._best[env_ids] = 0.0
+        self._start[env_ids] = 0.0
+        self._fresh[env_ids] = True
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        asset_cfg: SceneEntityCfg,
+        arm_cfg: SceneEntityCfg,
+        std: float = 0.2,
+        max_reward: float = 2000.0,
+    ) -> torch.Tensor:
+        phase = _phase_reached(env)
+        center, _ = _band_frame(env, command_name, arm_cfg)
+        distance = (center - self._sheet.data.root_pos_w.torch).norm(dim=-1)
+        closeness = torch.exp(-distance / std)
+
+        # the first step of phase two sets the mark rather than being paid against it
+        opening = self._fresh & phase
+        self._best = torch.where(opening, closeness, self._best)
+        self._start = torch.where(opening, closeness, self._start)
+        self._fresh = self._fresh & ~phase
+
+        gain = (closeness - self._best).clamp(min=0.0) * phase.float()
+        self._best = torch.maximum(self._best, closeness)
+
+        return gain * max_reward / env.step_dt
+
+
+class gripper_closed_near_band(ManagerTermBase):
+    """Per-step charge for keeping the gripper commanded shut once the sheet is over the band.
+
+    The release is the one action phase two has never produced: every run so far shows
+    ``Events/release`` at exactly zero, because opening risks the high-release penalty while
+    holding on keeps every dense term flowing. This is the counter-pressure -- once the sheet's
+    centre is inside :paramref:`radius` of the red region's centre, every step spent still
+    commanding the gripper closed costs :paramref:`penalty`. Arriving is no longer enough; the
+    clock starts running on letting go.
+
+    Judged on the *commanded* bit, deliberately, for the reason :class:`gripper_recommit_penalty`
+    lays out: the gripper channel is one raw Gaussian sample thresholded into open/shut, so the
+    command is the decision the policy actually controls and the measured finger width is a
+    lagging shadow of it. The threshold and sign are read off the action term itself, so the two
+    can never disagree about which side of the channel means open.
+
+    Gated on the phase latch and on the sheet actually being held. An empty gripper hovering over
+    the band is not refusing to release anything, and after a successful release the hand still
+    has to leave the sphere -- charging the closed command then would bill the retreat.
+
+    Note:
+        Divided by ``step_dt`` so :paramref:`penalty` is the literal per-step charge; the weight
+        carries the sign.
+
+    Args:
+        env: The environment.
+        command_name: Command term carrying the band's offset along the arm.
+        asset_cfg: The deformable sheet.
+        arm_cfg: The mannequin arm.
+        radius: Distance from the band centre within which the charge applies [m]. Matches the
+            reach milestone and the failure sphere, so "arrived" means the same thing everywhere.
+        penalty: Charged per step spent commanding the gripper closed inside that sphere [reward].
+        action_term_name: Action term carrying the binary gripper channel.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._sheet: DeformableObject = env.scene[cfg.params["asset_cfg"].name]
+        action_term = env.action_manager.get_term(cfg.params.get("action_term_name", "gripper_action"))
+        self._action_term = action_term
+        # read off the action term rather than restated here, so the two cannot come to disagree
+        # about which sign of the channel means open
+        self._threshold = float(action_term.cfg.threshold)
+        self._positive = bool(action_term.cfg.positive_threshold)
+        # steps spent inside the sphere still commanding closed, logged on reset: the direct
+        # measure of how long the policy hesitates over the band before letting go
+        self._held_steps = torch.zeros(env.num_envs, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        extras["Events/closed_over_band_steps"] = self._held_steps[env_ids].mean()
+        self._held_steps[env_ids] = 0.0
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        asset_cfg: SceneEntityCfg,
+        arm_cfg: SceneEntityCfg,
+        radius: float = 0.15,
+        penalty: float = 1.0,
+        action_term_name: str = "gripper_action",
+    ) -> torch.Tensor:
+        center, _ = _band_frame(env, command_name, arm_cfg)
+        distance = (center - self._sheet.data.root_pos_w.torch).norm(dim=-1)
+
+        raw = self._action_term.raw_actions[:, 0]
+        is_open = raw > self._threshold if self._positive else raw < self._threshold
+
+        charged = (
+            _phase_reached(env)
+            & _is_holding(env)
+            & (distance < radius)
+            & ~is_open
+        )
+        self._held_steps += charged.float()
+        return penalty * charged.float() / env.step_dt

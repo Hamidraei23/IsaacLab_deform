@@ -48,22 +48,28 @@ from isaaclab_tasks.utils import PresetCfg
 
 from .mdp import (
     ArmDrapePoseCommandCfg,
+    band_approach_progress,
+    drape_complete,
+    drape_failure_penalty,
+    drape_milestones,
+    gripper_closed_near_band,
     ee_speed_penalty,
     ee_table_clearance,
     finger_in_slot,
     grasp_alignment,
     band_center_distance,
     band_coverage,
+    goal_com_proximity,
     grasp_stage_reward,
     gripper_recommit_penalty,
 
     release_stage_reward,
     released_before_extraction,
-    released_too_high,
     reset_arm_and_sheet,
     sheet_key_points,
     sheet_lift_progress,
     squareness_progress,
+    table_drop_penalty,
     top_edge_distance,
 )
 
@@ -79,6 +85,13 @@ YAW_RANGE = (-math.pi / 2, math.pi / 2)
 
 EPISODE_STEPS = 500
 """Episode length in environment steps, at the 30 Hz control rate."""
+
+DRAPE_SETTLE_STEPS = 30
+"""How long a finished drape must hold before it is scored a success [steps].
+
+One second at the 30 Hz control rate, and a twentieth of the episode -- long enough for the cloth
+to have visibly stopped moving, short enough that the wait is not itself an obstacle.
+"""
 
 ##
 # Scene geometry
@@ -595,27 +608,154 @@ class SheetRewardsCfg:
 
     # -- phase two: drape the sheet on the red band
     #
-    # ``exp(-d / std)`` on the distance from the sheet's centre of mass to the centre of the red
-    # region, and nothing until the sheet is clear of the slot. Exponential rather than the tanh
-    # the rest of the file uses because this one has to carry the sheet across a third of a metre:
-    # tanh's tail is flat enough there that a centimetre of progress is invisible next to the
-    # policy's own action noise, while an exponential's slope is a constant *fraction* of its
-    # value, so it never goes numerically dead however far away the sheet starts.
+    # Pays for *arriving* at the band, not for being near it. Ratcheted: the episode keeps a
+    # high-water mark of exp(-d/0.2) and each step is paid only what it adds to that mark, so the
+    # total telescopes to max_reward times the closeness actually gained during the carry.
+    #
+    # This replaces a level reward that the 17:42 run showed was the largest single income in the
+    # task -- ~2,600 per episode, 42% of all positive reward, collected by hovering. A level term
+    # makes parking next to the arm an annuity worth more than finishing, since finishing ends the
+    # episode that pays it; under the ratchet holding still adds nothing and backing off then
+    # returning re-covers ground already paid for. The pressure to *stay* comes from
+    # ``drape_failure`` instead.
     drape_closeness = RewTerm(
-        func=band_center_distance,
+        func=band_approach_progress,
         params={
             "command_name": "deformable_pose",
             "std": 0.2,
+            # the TOTAL for a full approach, not a per-step rate -- comparable to what the pick
+            # pays, but bounded and paid once
+            "max_reward": 2000.0,
+            "asset_cfg": SceneEntityCfg("deformable"),
+            "arm_cfg": SceneEntityCfg("mannequin_arm"),
+        },
+        # the term divides by dt internally, so max_reward above is the literal total
+        weight=1.0,
+    )
+
+    # Straight-line pull on the sheet's centre of mass toward the goal point: 15 a step on the
+    # point, falling linearly to 1 at 15 cm, nothing beyond. Measured against the same point the
+    # success visualiser tints the table on, so what the viewer shows and what the policy is paid
+    # for agree.
+    #
+    # This is a level reward and therefore an annuity -- the shape ``band_approach_progress`` was
+    # rebuilt as a ratchet to avoid, after a level term became 42% of all positive reward and was
+    # collected by hovering. At 15 a step it is worth up to ~7,400 across the episode, the same
+    # order as the 8,000 success bonus, and hovering with the sheet held collects it while
+    # ``hold_over_band`` claws back only 1 a step. Watch ``Events/complete`` against episode return:
+    # if return climbs while completions do not, this term is being farmed, and the fixes in order
+    # of bluntness are raising ``hold_over_band``, shrinking ``max_distance``, or dropping
+    # ``max_reward``.
+    goal_proximity = RewTerm(
+        func=goal_com_proximity,
+        params={
+            "command_name": "deformable_pose",
+            "max_reward": 15.0,
+            "min_reward": 1.0,
+            # the sphere the rest of phase two is written in: the reach bonus pays for entering it
+            # and ``drape_failure`` charges for ending outside it
+            "max_distance": 0.15,
+            # a randomised reset can leave the slot within 15 cm of the arm, so without this the
+            # term would pay for a sheet still standing where it spawned
             "gate_on_phase": True,
             "asset_cfg": SceneEntityCfg("deformable"),
             "arm_cfg": SceneEntityCfg("mannequin_arm"),
         },
-        weight=60.0,
+        # the term divides by dt internally, so the magnitudes above are literal per-step amounts
+        weight=1.0,
+    )
+
+    # What the centre-distance term cannot see: whether the sheet is *spread over* the band or
+    # balled up on top of it. Coverage is the quantity the success test is written in, so the
+    # policy has to be paid in the same currency. Level rather than ratcheted, and therefore
+    # farmable: at 40/step a full-coverage drape is worth 20,000 across the episode, and the
+    # observed ~0.43 mean coverage still yields around 8,600. That is now the largest income in the
+    # task by a wide margin, and the pressure against collecting it indefinitely -- the
+    # closed-over-band charge at 1/step and a success bonus that ends the episode paying it -- is
+    # correspondingly weaker than it was at 20/step.
+    drape_coverage = RewTerm(
+        func=band_coverage,
+        params={
+            "command_name": "deformable_pose",
+            "band_length": TARGET_BAND_WIDTH,
+            "band_radius": MANNEQUIN_ARM_RADIUS,
+            # must exceed the 0.025 m node spacing or a correct drape reads as covering nothing
+            "cover_threshold": 0.03,
+            "num_axial": 5,
+            "num_angular": 7,
+            "coverage_arc": math.pi / 2,
+            "gate_on_phase": True,
+            "asset_cfg": SceneEntityCfg("deformable"),
+            "arm_cfg": SceneEntityCfg("mannequin_arm"),
+        },
+        # dense: 40 per step at full coverage
+        weight=1200.0,
+    )
+
+    # The three moments the dense terms cannot mark, each paid once. Declared after
+    # ``drape_coverage`` because it reads the coverage fraction that term publishes.
+    drape_stage = RewTerm(
+        func=drape_milestones,
+        params={
+            "command_name": "deformable_pose",
+            # the same sphere ``drape_failure`` charges for missing and the closed-over-band
+            # charge is gated on, so "arrived" means one thing everywhere
+            "reach_radius": 0.15,
+            "reach_bonus": 80.0,
+            "touch_coverage": 0.0,
+            "touch_bonus": 40.0,
+            # The task's success bar: cloth out of the gripper covering at least 20% of the
+            # reachable band. Set from the observed drape distribution -- episodes that touch at
+            # all peak at ~0.43 mean coverage, so 0.2 is a bar the existing behaviour clears
+            # while still requiring a real drape rather than a graze.
+            "success_coverage": 0.2,
+            # The drape has to survive a second on its own before it scores. Coverage crossing the
+            # bar says nothing about which direction the sheet is travelling: a cloth sliding off
+            # the arm passes 0.2 on the way down exactly as it does on the way up, and terminating
+            # on the crossing pays the bonus for the first without ever seeing the second. The wait
+            # is what makes the bonus a payment for a drape that stays put.
+            "dwell_steps": DRAPE_SETTLE_STEPS,
+            # Sized against the alternative, not the other one-shots: finishing *ends* the episode
+            # that pays the coverage annuity, so the bonus has to beat the stream it cuts off.
+            #
+            # It no longer does. At 40/step, a drape held at the observed ~0.43 coverage pays about
+            # 17 a step, so completing with 200 steps left forfeits ~3,400 of coverage income to
+            # collect 3,200 -- the bonus is now worth less than not finishing, and the gap widens
+            # the earlier in the episode the drape is completed. The dwell requirement is what the
+            # policy would exploit: re-grasping resets the settling counter without disturbing
+            # coverage much, so a grab-and-jiggle loop keeps the annuity running indefinitely.
+            "success_bonus": 3200.0,
+            "asset_cfg": SceneEntityCfg("deformable"),
+            "arm_cfg": SceneEntityCfg("mannequin_arm"),
+        },
+        # the term divides by dt internally, so all three magnitudes above are literal one-shots
+        weight=1.0,
+    )
+
+    # Once the sheet is over the band, every step spent still commanding the gripper shut costs 1.
+    # The release is the action phase two has never produced -- ``Events/release`` has been exactly
+    # zero in every run -- because opening risks a penalty while holding keeps the dense terms
+    # flowing. This starts a clock on letting go: ~30 per second of hesitation, judged on the raw
+    # commanded bit rather than the measured width, since the command is the decision the policy
+    # controls.
+    hold_over_band = RewTerm(
+        func=gripper_closed_near_band,
+        params={
+            "command_name": "deformable_pose",
+            "radius": 0.15,
+            "penalty": 1.0,
+            "asset_cfg": SceneEntityCfg("deformable"),
+            "arm_cfg": SceneEntityCfg("mannequin_arm"),
+        },
+        # the term divides by dt internally and returns a positive magnitude, so the weight
+        # carries the sign and 1.0 above is the literal per-step charge
+        weight=-1.0,
     )
 
     # The act that finishes the task, and the one that can ruin it. Opening the gripper below
     # ``release_height`` is paid in proportion to how well the sheet is placed; opening it above is
-    # charged 800 and ends the episode. Judged on the commanded bit, like ``gripper_recommit``.
+    # charged and the episode carries on, so where the sheet actually lands still decides the rest.
+    # Judged on the commanded bit, like ``gripper_recommit``.
     release_stage = RewTerm(
         func=release_stage_reward,
         params={
@@ -635,30 +775,97 @@ class SheetRewardsCfg:
             # well-placed sheet forever scores exactly as well as draping it, and the policy has no
             # reason to ever open the gripper. Set to 0.0 to score the drape on closeness alone.
             "release_bonus": 500.0,
-            "high_release_penalty": 800.0,
+            # Cut from 800 while the release itself is still unlearned: at 800 the one action the
+            # task needs was priced as more dangerous than anything else the policy could do, and
+            # every run showed the result -- zero commanded releases, ever. 300 still makes a drop
+            # from height clearly bad without making the gripper channel untouchable.
+            #
+            # Charged per event rather than latched, unlike the bonus beside it. That asymmetry was
+            # invisible while a high release ended the episode; now that it does not, a policy that
+            # re-grasps and drops again is charged again, which is the right reading -- each drop is
+            # its own mistake -- but it does mean the phase can cost more than 300 in total.
+            "high_release_penalty": 300.0,
         },
         # the term divides by dt internally, so both magnitudes above are literal one-shot returns
+        weight=1.0,
+    )
+
+    # The sheet on the floor: out of the gripper, flat on the table and nowhere near the arm. Paid
+    # on top of ``drape_failure``, which charges 1100 on whatever ending does arrive, so a dropped
+    # sheet costs 1600 against the 1100 an episode that times out still holding it pays. That gap is
+    # the whole point of the term -- without it the two score the same, and nothing distinguishes
+    # hanging on to a marginal grasp from letting the sheet flop.
+    #
+    # Charged once per episode and the episode continues, so the remaining steps are spent with the
+    # sheet on the table earning nothing. Latched internally, so lying there does not keep costing.
+    #
+    # Kept to 500 rather than sized to dominate. The nearest cautionary tale in this file is
+    # ``high_release_penalty``, cut from 800 to 300 because pricing the release as the most
+    # dangerous act available produced runs with zero commanded releases, ever. A release that does
+    # not take ends with the sheet sliding off the arm onto the table, so this term sits on that
+    # same channel and can poison it the same way.
+    dropped_on_table = RewTerm(
+        func=table_drop_penalty,
+        params={
+            "asset_cfg": SceneEntityCfg("deformable"),
+            "arm_cfg": SceneEntityCfg("mannequin_arm"),
+            "arm_radius": MANNEQUIN_ARM_RADIUS,
+            "arm_length": MANNEQUIN_ARM_LENGTH,
+            # comfortably under the ~0.08 the top of a correctly draped sheet sits at, and loose
+            # enough that a wrinkle in a sheet lying flat does not read as still being airborne
+            "table_height": 0.03,
+            "touch_margin": 0.01,
+            # ~0.17 s at the 30 Hz control rate, so a sheet swinging past on its way somewhere does
+            # not end the episode
+            "settle_steps": 5,
+            "penalty": 500.0,
+        },
+        # the term divides by dt internally, so the magnitude above is the literal one-shot charge
+        weight=1.0,
+    )
+
+    # The task's pass/fail, charged on whichever step the episode ends and blind to why it ended:
+    # a time-out, a sheet flung out of bounds and a drop from height are all the same failure,
+    # since in each the cloth finished somewhere other than on the arm. Exempting time-outs would
+    # make running out the clock the free way to dodge it, so ``dones`` is used whole. This is
+    # also what replaces the ratchet's missing "stay there" pressure: leaving the sphere before
+    # the episode ends turns the -1100 back on.
+    drape_failure = RewTerm(
+        func=drape_failure_penalty,
+        params={
+            "command_name": "deformable_pose",
+            # the same sphere the reach milestone pays +200 for entering
+            "success_radius": 0.15,
+            "penalty": 1100.0,
+            "asset_cfg": SceneEntityCfg("deformable"),
+            "arm_cfg": SceneEntityCfg("mannequin_arm"),
+        },
+        # the term divides by dt internally, so the magnitude above is the literal one-shot charge
         weight=1.0,
     )
 
 
 @configclass
 class SheetTerminationsCfg(TerminationsCfg):
-    """The inherited bounds, plus the three ways of throwing the episode away.
+    """The inherited bounds, plus the three ways an episode ends early.
 
-    Every one of them ends the episode rather than only costing reward, and for the same reason:
-    each puts the sheet somewhere nothing the policy does afterwards can retrieve, so the remaining
-    steps are better spent on a fresh episode.
+    Two phase-two failures that could be here are deliberately *not*: a release from above the
+    ceiling and a sheet dropped flat on the table are both charged -- 300 and 500 respectively --
+    and both leave the episode running. Ending on them would decide the outcome at the moment the
+    sheet leaves the hand, which is the one moment the physics has not yet resolved: a sheet let go
+    high over the band can still land on the arm, settle and be scored a success, and a sheet on
+    the table still has to be paid for by ``drape_failure`` at whatever ending does arrive. Charging
+    without ending keeps the price of the mistake and lets the outcome decide the rest.
 
-    Extraction is conspicuously *not* here any more. Pulling the sheet clear of the slot used to be
-    the task and ended the episode on the spot; it is now the boundary between the two phases, and
-    the episode carries straight on into the drape.
+    Extraction is conspicuously not here either. Pulling the sheet clear of the slot used to be the
+    task and ended the episode on the spot; it is now the boundary between the two phases, and the
+    episode carries straight on into the drape.
     """
 
     released_early = DoneTerm(func=released_before_extraction)
 
-    # phase two's counterpart: the sheet is out, but it was dropped rather than laid down
-    released_high = DoneTerm(func=released_too_high)
+    # the one ending that is not a failure: the sheet has sat covered on the band for a full second
+    draped = DoneTerm(func=drape_complete)
 
     finger_touched_slot = DoneTerm(
         func=finger_in_slot,

@@ -35,11 +35,15 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_mini_batches=4,
         learning_rate=1.0e-3,
         schedule="adaptive",
-        # 0.99 gives a discount horizon of 100 steps, which was the same order as the ~89-step
-        # episodes -- so the extraction bonus was being discounted to 41% of face value simply
-        # for arriving at the end, and every extra step cost about 12 reward. That is a hurry-up
-        # pressure the speed penalty has to fight rather than a property of the task. 0.995
-        # doubles the horizon to 200 steps, so a slower policy is not charged for taking longer.
+        # 0.99 gives a discount horizon of 100 steps, which was the same order as the episodes
+        # themselves -- so the success bonus was discounted to 41% of face value simply for
+        # arriving at the end, and every extra step cost real reward. That is a hurry-up pressure
+        # the speed penalty has to fight rather than a property of the task. 0.995 doubles the
+        # horizon to 200 steps, so a slower policy is not charged for taking longer.
+        #
+        # It also lengthens the reach of the coverage annuity, which at 40/step is the term most
+        # able to exploit a longer horizon: a stream held to the end of a 500-step episode is now
+        # discounted far less against the success bonus that would cut it off.
         gamma=0.995,
         lam=0.95,
         desired_kl=0.01,

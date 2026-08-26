@@ -51,6 +51,12 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
         self.arm: RigidObject = env.scene[cfg.arm_name]
         # where along the arm's axis the target band sits, in the arm's frame
         self.band_offset_b = torch.zeros(self.num_envs, 3, device=self.device)
+        # the goal point itself in the arm's frame: the band offset plus the lift off the surface.
+        # Published for the same reason ``band_offset_b`` is -- reward terms run before the command
+        # manager within a step, so ``pose_command_w`` is one step stale when they read it, and
+        # simply wrong on the first step after a reset. Combining this with the arm's live pose is
+        # always current, and gives the same point the success visualiser measures against.
+        self.goal_offset_b = torch.zeros(self.num_envs, 3, device=self.device)
         self.band_visualizer = VisualizationMarkers(self.cfg.band_visualizer_cfg)
         self.band_visualizer.set_visibility(True)
         # The marker prototype's own "axis" attribute is not honoured by every visualizer backend,
@@ -75,6 +81,7 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
         # above the middle of the red region
         self.band_offset_b[env_ids] = 0.0
         self.band_offset_b[env_ids, 0] = local[:, 0]
+        self.goal_offset_b[env_ids] = local
 
         # express in the robot root frame with the inverse of the transform the base class'
         # _update_metrics applies, so the two cancel and no quaternion convention is assumed here
