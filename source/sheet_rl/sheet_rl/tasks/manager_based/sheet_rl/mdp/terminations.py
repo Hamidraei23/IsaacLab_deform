@@ -17,6 +17,8 @@ from isaaclab.utils.math import quat_apply_inverse
 from .rewards import _drape_success, _early_release, _high_release, _table_drop
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from isaaclab.assets import Articulation, RigidObject
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -104,7 +106,9 @@ def finger_in_slot(
     half_extents: tuple[float, float, float],
     margin: float = 0.005,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    slot_cfgs: tuple[SceneEntityCfg, ...] = (
+    # Sequence rather than tuple: the config passes a list, because Hydra's slice-to-string pass
+    # does not recurse into tuples and would leave a SceneEntityCfg's default slice in place.
+    slot_cfgs: Sequence[SceneEntityCfg] = (
         SceneEntityCfg("slot_neg_y"),
         SceneEntityCfg("slot_pos_y"),
     ),

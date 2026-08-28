@@ -1158,23 +1158,25 @@ class release_stage_reward(ManagerTermBase):
     shaping for that is :func:`band_center_distance`; this term handles the single discrete act
     that finishes it, the opening of the gripper.
 
-    Two outcomes:
+    Three outcomes, decided by how high the end-effector was when the hand opened:
 
-    * **a placement** -- the band is already covered past :paramref:`success_coverage`, *or* the
-      end-effector is below :paramref:`release_height`. Paid :paramref:`release_bonus` scaled by
-      how well the sheet is placed at that instant, so the bonus is worth taking only once the
-      cloth is actually over the band. Once per episode: re-closing and re-opening does not pay
+    * **a placement** -- at or below :paramref:`release_height`. Paid :paramref:`release_bonus`
+      scaled by how well the sheet is placed at that instant, so the bonus is worth taking only
+      once the cloth is over the band. Once per episode: re-closing and re-opening does not pay
       again.
-    * **a drop** -- the band is not covered *and* the hand is above the ceiling. Charged
-      :paramref:`high_release_penalty`.
+    * **a high release** -- between :paramref:`release_height` and :paramref:`high_release_limit`.
+      Charged on a straight line from nothing at the first to :paramref:`high_release_penalty` at
+      the second. The episode continues, so where the sheet lands still decides the rest.
+    * **an abort** -- above :paramref:`high_release_limit`. Charged :paramref:`abort_penalty` and
+      the episode ends, via the flag the matching termination reads.
 
-    Coverage is checked first, and that ordering is the whole point. Height alone cannot tell a
-    drape from a drop: the hand holding the free edge of a 0.2 m sheet laid over an arm whose top
-    surface is at 0.08 m sits above any ceiling tight enough to catch a genuine drop. A height-only
-    test therefore prices every release a correctly-draping policy can physically make as a
-    failure, and the observed result was a policy that spent 45% of each episode with the drape
-    finished and the gripper shut, paying to hold rather than 300 to let go. Coverage is the
-    evidence the height was always standing in for.
+    The middle band is the whole design. A single ceiling tells the policy only that it was on the
+    wrong side of a line it cannot see, and gives the same answer whether it opened a centimetre
+    too high or thirty; both were tried here and both produced a policy that would not open its
+    hand at all. A ramp answers the question the policy is actually asking -- *which way should the
+    hand move before I let go* -- and answers it on every release, including the bad ones. Getting
+    the sheet all the way down is the behaviour being taught, and this is the only term that
+    measures how far down the hand got.
 
     Judged on the *commanded* bit rather than on the measured finger width, for the reason
     :class:`gripper_recommit_penalty` sets out at length: the gripper is one binary channel driven
@@ -1211,14 +1213,15 @@ class release_stage_reward(ManagerTermBase):
         action_term_name: Action term carrying the binary gripper channel.
         std: Distance over which the placement quality scaling the bonus decays by a factor of e
             [m]. Kept equal to the dense term's scale so the two agree on what "close" means.
-        release_height: End-effector height above which opening the gripper is a drop [m] -- but
-            only when the band is not already covered; see :paramref:`success_coverage`.
-        success_coverage: Coverage fraction at or above which a release counts as a placement
-            whatever the hand's height. Keep equal to :class:`drape_milestones`' own threshold, so
-            "the drape is done" means one thing in the term that scores it and the term that prices
-            letting go of it.
-        release_bonus: Paid for a release that is not a drop, times placement quality [reward].
-        high_release_penalty: Charged for a release above it [reward].
+        release_height: End-effector height at or below which opening the gripper is a placement,
+            and the point where the graded charge is zero [m].
+        high_release_limit: Height at which the graded charge reaches
+            :paramref:`high_release_penalty`, and above which the release aborts the episode [m].
+        release_bonus: Paid for a placement, times placement quality [reward].
+        high_release_penalty: The graded charge at :paramref:`high_release_limit`; a release
+            between the two heights pays a linear fraction of it [reward].
+        abort_penalty: Charged for a release above :paramref:`high_release_limit`, which also ends
+            the episode [reward].
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
@@ -1243,7 +1246,7 @@ class release_stage_reward(ManagerTermBase):
 
         self._counts = {
             name: torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
-            for name in ("release", "high_release")
+            for name in ("release", "high_release", "aborted")
         }
         # best placement the episode ever reached, logged on reset. Without it "never draped" and
         # "draped well but never let go" are both a zero release count.
@@ -1274,9 +1277,10 @@ class release_stage_reward(ManagerTermBase):
         action_term_name: str = "gripper_action",
         std: float = 0.2,
         release_height: float = 0.1,
-        success_coverage: float = 0.2,
+        high_release_limit: float = 0.25,
         release_bonus: float = 500.0,
-        high_release_penalty: float = 800.0,
+        high_release_penalty: float = 1000.0,
+        abort_penalty: float = 1500.0,
     ) -> torch.Tensor:
         pose = self._robot.data.body_link_pose_w.torch[:, self._hand_id]
         offset = torch.tensor(grasp_offset, device=pose.device).expand(len(pose), 3)
@@ -1294,27 +1298,34 @@ class release_stage_reward(ManagerTermBase):
 
         # only a hand that had the sheet can let go of it
         opening = self._was_holding & phase & is_open
-        # A release is a *drop* only if the sheet is not already on the band. Height alone cannot
-        # tell the two apart: to drape a 0.2 m sheet over an arm whose top surface is at 0.08, the
-        # hand holding the free edge sits well above any ceiling tight enough to catch a real drop,
-        # so a height-only test marks every release a correctly-draping policy can physically make
-        # as a failure -- which is the one action the task needs. Coverage is the direct evidence
-        # the height was standing in for: if the cloth is already spread over the region, opening
-        # the hand finishes the task from wherever the hand happens to be.
-        uncovered = _last_coverage(env) < success_coverage
-        dropped = opening & uncovered & (height > release_height)
-        placed = opening & ~dropped & ~self._released
+        # Three bands of height, and the charge is graded across them rather than switched. A cliff
+        # at the ceiling tells the policy only that it was on the wrong side of a line it cannot
+        # see; a ramp tells it which way to move, on every release it ever makes. That gradient is
+        # the point -- the descent is the behaviour being taught, and this is the only term that
+        # pays attention to how far down the hand got.
+        aborted = opening & (height > high_release_limit)
+        high = opening & ~aborted & (height > release_height)
+        placed = opening & (height <= release_height) & ~self._released
 
-        reward = release_bonus * placement * placed.float() - high_release_penalty * dropped.float()
+        span = max(high_release_limit - release_height, 1e-6)
+        graded = high_release_penalty * ((height - release_height) / span).clamp(0.0, 1.0)
 
-        # read by the matching termination, which is what actually ends the episode
-        _high_release(env).copy_(dropped)
+        reward = (
+            release_bonus * placement * placed.float()
+            - graded * high.float()
+            - abort_penalty * aborted.float()
+        )
+
+        # only the abort ends the episode; a release inside the ramp is charged and play continues,
+        # so where the sheet actually lands still decides the rest
+        _high_release(env).copy_(aborted)
         self._released |= placed
         # cloned: the flag is a single tensor the grasp term overwrites in place every step
         self._was_holding = _is_holding(env).clone()
         self._best_placement = torch.maximum(self._best_placement, placement * phase.float())
         self._counts["release"] += placed
-        self._counts["high_release"] += dropped
+        self._counts["high_release"] += high
+        self._counts["aborted"] += aborted
 
         return reward / env.step_dt
 
@@ -1533,6 +1544,12 @@ class drape_milestones(ManagerTermBase):
     * :paramref:`success_bonus` -- the task is finished: the cloth has been out of the gripper *and*
       covering at least :paramref:`success_coverage` of the region for :paramref:`dwell_steps`
       consecutive steps. The latch this sets is what the success termination reads.
+    * :paramref:`symmetry_bonus` -- paid alongside it, scaled by how evenly the sheet fell. A sheet
+      laid squarely over the arm hangs down both sides and all four corners reach the table; one
+      that went on askew leaves a corner up on the arm or folded back across it. The bonus is full
+      when the highest corner is on the table and tapers linearly to nothing at
+      :paramref:`symmetry_span`. Coverage cannot see this -- it samples only the band's own surface,
+      so a sheet bunched to one side can cover the region perfectly well while hanging all wrong.
 
     Success is deliberately tested as a *state* rather than as the release event. Cloth settles: a
     sheet let go at 70% coverage may sag onto the band and pass 80% a few steps later, and that is
@@ -1578,6 +1595,12 @@ class drape_milestones(ManagerTermBase):
         dwell_steps: Consecutive steps the out-of-gripper, covered state must hold before the drape
             counts as finished.
         success_bonus: Paid once, on finishing [reward].
+        resolution: The sheet mesh's ``(x, y)`` element counts, as given to its spawner. The node
+            grid is one larger in each direction; used to find the four corners.
+        symmetry_bonus: Paid on top of :paramref:`success_bonus`, scaled by how evenly the sheet
+            fell -- in full when every corner is on the table, tapering to nothing when the highest
+            corner is :paramref:`symmetry_span` above it [reward].
+        symmetry_span: Corner height at which the symmetry bonus reaches zero [m].
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
@@ -1600,6 +1623,11 @@ class drape_milestones(ManagerTermBase):
         # only the completion count is watched.
         self._dwell = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
         self._best_dwell = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
+        # how even the drape was at the instant it scored, and the raw corner height behind it.
+        # Only meaningful on episodes that succeeded; logged so the symmetry bonus can be seen to
+        # be earned rather than merely offered.
+        self._success_symmetry = torch.zeros(env.num_envs, device=env.device)
+        self._success_corner = torch.zeros(env.num_envs, device=env.device)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
@@ -1610,6 +1638,14 @@ class drape_milestones(ManagerTermBase):
             counter[env_ids] = 0
         extras["Events/best_coverage"] = self._best_coverage[env_ids].mean()
         extras["Events/best_dwell"] = self._best_dwell[env_ids].float().mean()
+        # averaged over successful episodes only: on a run that never scored these stay zero, and
+        # mixing those in would read as "every drape was maximally lopsided"
+        scored = self._complete[env_ids]
+        if scored.any():
+            extras["Events/success_symmetry"] = self._success_symmetry[env_ids][scored].mean()
+            extras["Events/success_corner_height"] = self._success_corner[env_ids][scored].mean()
+        self._success_symmetry[env_ids] = 0.0
+        self._success_corner[env_ids] = 0.0
         self._best_coverage[env_ids] = 0.0
         self._dwell[env_ids] = 0
         self._best_dwell[env_ids] = 0
@@ -1631,6 +1667,9 @@ class drape_milestones(ManagerTermBase):
         success_coverage: float = 0.8,
         dwell_steps: int = 30,
         success_bonus: float = 500.0,
+        resolution: tuple[int, int] = (8, 8),
+        symmetry_bonus: float = 0.0,
+        symmetry_span: float = 0.05,
     ) -> torch.Tensor:
         phase = _phase_reached(env)
         center, _ = _band_frame(env, command_name, arm_cfg)
@@ -1652,11 +1691,32 @@ class drape_milestones(ManagerTermBase):
         self._best_dwell = torch.maximum(self._best_dwell, self._dwell)
         complete = (self._dwell >= dwell_steps) & ~self._complete
 
+        # -- how evenly the sheet fell, judged at the moment it scores.
+        #
+        # A sheet laid squarely over the arm hangs down both sides and all four corners reach the
+        # table; one that went on askew leaves a corner up on the arm or folded back over it. The
+        # *highest* corner is what says which happened -- an average would let three good corners
+        # hide the bad one, which is exactly the asymmetry being penalised.
+        cols = resolution[0] + 1
+        rows = resolution[1] + 1
+        nodes = self._sheet.data.nodal_pos_w.torch
+        corner_ids = torch.tensor(
+            [0, cols - 1, (rows - 1) * cols, rows * cols - 1], device=nodes.device
+        )
+        corners_z = nodes[:, corner_ids, 2]
+        # heights above the table, whose surface is zero in the environment frame
+        highest_corner = (corners_z - env.scene.env_origins[:, 2].unsqueeze(1)).max(dim=1).values
+        symmetry = ((symmetry_span - highest_corner) / symmetry_span).clamp(0.0, 1.0)
+
         reward = (
             reach_bonus * reached.float()
             + touch_bonus * touched.float()
             + success_bonus * complete.float()
+            + symmetry_bonus * symmetry * complete.float()
         )
+
+        self._success_symmetry = torch.where(complete, symmetry, self._success_symmetry)
+        self._success_corner = torch.where(complete, highest_corner, self._success_corner)
 
         self._reached |= reached
         self._touched |= touched
@@ -1761,6 +1821,94 @@ class band_approach_progress(ManagerTermBase):
         self._best = torch.maximum(self._best, closeness)
 
         return gain * max_reward / env.step_dt
+
+
+class finger_arm_contact_penalty(ManagerTermBase):
+    """Charge for every time a fingertip touches the mannequin arm.
+
+    The descent this task now asks for -- take the sheet all the way down to within 10 cm of the
+    table before letting go -- brings the fingers past an obstacle that was never in the way while
+    the policy released from height. Nothing else in the reward notices the arm at all: it is
+    kinematic and gravity-free, so a finger driven into it neither moves it nor disturbs the
+    physics, and the run continues as though the collision had not happened. On hardware it would
+    be the one outcome that ends the attempt.
+
+    Counted per *contact*, not per step. The charge is edge-triggered on a fingertip crossing from
+    clear to touching, so resting against the arm costs 800 once rather than 800 every frame; a
+    per-step charge at this size would dwarf every other term in the task within a second. Backing
+    off and touching again is a second contact and is charged again, which is the intent -- each
+    one is a separate collision.
+
+    Tested geometrically against the capsule rather than through a contact sensor, for the reasons
+    :func:`~.terminations.finger_in_slot` gives: the arm is kinematic and its pose is known
+    exactly, so the distance test is cheaper and steadier than reading contacts back through the
+    rigid-soft coupler, and it fires a hair *before* a real touch, which is the useful side to err
+    on. Projecting onto the axis and clamping to the cylindrical section handles the rounded end
+    caps for free.
+
+    Note:
+        Divided by ``step_dt`` so :paramref:`penalty` is the literal charge per contact; the weight
+        carries the sign.
+
+    Args:
+        env: The environment.
+        arm_radius: Radius of the arm capsule [m].
+        arm_length: Length of the capsule's cylindrical section, end caps excluded [m].
+        margin: Clearance from the capsule's surface at which a fingertip counts as touching [m].
+        penalty: Charged once per contact [reward].
+        robot_cfg: The robot carrying the fingers.
+        arm_cfg: The mannequin arm.
+        finger_body_names: Bodies treated as fingertips.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._robot: Articulation = env.scene[cfg.params["robot_cfg"].name]
+        self._arm: RigidObject = env.scene[cfg.params["arm_cfg"].name]
+        names = cfg.params.get("finger_body_names", ("panda_leftfinger", "panda_rightfinger"))
+        self._finger_ids = [self._robot.body_names.index(name) for name in names]
+        # per finger, so one pad already resting on the arm does not mask the other arriving
+        self._touching = torch.zeros(
+            env.num_envs, len(self._finger_ids), dtype=torch.bool, device=env.device
+        )
+        self._contacts = torch.zeros(env.num_envs, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        extras["Events/arm_contacts"] = self._contacts[env_ids].mean()
+        self._contacts[env_ids] = 0.0
+        self._touching[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        arm_radius: float,
+        arm_length: float,
+        robot_cfg: SceneEntityCfg,
+        arm_cfg: SceneEntityCfg,
+        margin: float = 0.005,
+        penalty: float = 800.0,
+        finger_body_names: tuple[str, ...] = ("panda_leftfinger", "panda_rightfinger"),
+    ) -> torch.Tensor:
+        tips = self._robot.data.body_link_pose_w.torch[:, self._finger_ids, :3]
+
+        center = self._arm.data.root_pos_w.torch
+        unit_x = torch.tensor([1.0, 0.0, 0.0], device=tips.device).expand(len(tips), 3)
+        axis = quat_apply(self._arm.data.root_quat_w.torch, unit_x)
+        offset = tips - center.unsqueeze(1)
+        along = (offset * axis.unsqueeze(1)).sum(-1).clamp(-0.5 * arm_length, 0.5 * arm_length)
+        radial = (offset - along.unsqueeze(-1) * axis.unsqueeze(1)).norm(dim=-1)
+
+        touching = (radial - arm_radius) < margin
+        # edge-triggered: only the step a pad arrives is charged
+        arrived = touching & ~self._touching
+        self._touching = touching
+
+        charged = arrived.sum(dim=1).float()
+        self._contacts += charged
+        return penalty * charged / env.step_dt
 
 
 class timeout_still_gripping(ManagerTermBase):

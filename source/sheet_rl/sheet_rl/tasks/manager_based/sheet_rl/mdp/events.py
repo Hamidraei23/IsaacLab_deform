@@ -15,6 +15,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_from_euler_xyz, sample_uniform
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from isaaclab.assets import DeformableObject, RigidObject
     from isaaclab.envs import ManagerBasedEnv
 
@@ -26,7 +28,9 @@ def reset_arm_and_sheet(
     yaw_range: tuple[float, float],
     arm_cfg: SceneEntityCfg = SceneEntityCfg("mannequin_arm"),
     sheet_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
-    slot_cfgs: tuple[SceneEntityCfg, ...] = (
+    # Sequence rather than tuple: the config passes a list, because Hydra's slice-to-string pass
+    # does not recurse into tuples and would leave a SceneEntityCfg's default slice in place.
+    slot_cfgs: Sequence[SceneEntityCfg] = (
         SceneEntityCfg("slot_neg_y"),
         SceneEntityCfg("slot_pos_y"),
     ),

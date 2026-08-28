@@ -1,7 +1,7 @@
 # Sheet RL — pulling a deformable sheet out of a slot
 
 <p align="center">
-  <img src="media/one.gif" alt="Franka Panda pulling a cloth sheet out of a slot" width="100%">
+  <img src="media/hand_placement.gif" alt="Franka Panda pulling a cloth sheet out of a slot" width="100%">
 </p>
 
 A Franka Panda learns to pinch the free edge of a cloth sheet standing upright in a narrow slot and

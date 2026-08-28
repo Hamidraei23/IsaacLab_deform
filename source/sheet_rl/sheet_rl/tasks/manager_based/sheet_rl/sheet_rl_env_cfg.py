@@ -57,6 +57,7 @@ from .mdp import (
     gripper_closed_near_band,
     ee_speed_penalty,
     ee_table_clearance,
+    finger_arm_contact_penalty,
     finger_in_slot,
     grasp_alignment,
     band_center_distance,
@@ -67,6 +68,7 @@ from .mdp import (
 
     release_stage_reward,
     released_before_extraction,
+    released_too_high,
     reset_arm_and_sheet,
     sheet_key_points,
     sheet_lift_progress,
@@ -408,7 +410,12 @@ class SheetEventCfg:
             "yaw_range": YAW_RANGE,
             "arm_cfg": SceneEntityCfg("mannequin_arm"),
             "sheet_cfg": SceneEntityCfg("deformable"),
-            "slot_cfgs": (SceneEntityCfg("slot_neg_y"), SceneEntityCfg("slot_pos_y")),
+            # a list, not a tuple, and that is not cosmetic: Hydra serialises the whole env config
+            # through ``replace_slices_with_strings``, which recurses into dicts and lists but not
+            # tuples. A ``SceneEntityCfg`` inside a tuple therefore keeps its default
+            # ``joint_ids=slice(None)``, which OmegaConf rejects outright -- every entry point that
+            # registers the task with Hydra dies before the simulator even starts.
+            "slot_cfgs": [SceneEntityCfg("slot_neg_y"), SceneEntityCfg("slot_pos_y")],
         },
     )
 
@@ -743,6 +750,15 @@ class SheetRewardsCfg:
             # policy would exploit: re-grasping resets the settling counter without disturbing
             # coverage much, so a grab-and-jiggle loop keeps the annuity running indefinitely.
             "success_bonus": 3200.0,
+            # Paid alongside the success bonus and scaled by how evenly the sheet fell: full at
+            # 5000 when the highest of the four corners is on the table, nothing once it is 10 cm
+            # up. Coverage is blind to this -- it samples only the band's own surface, so a sheet
+            # bunched to one side scores exactly like one hanging square, which is the asymmetric
+            # drape being seen now. The *highest* corner rather than the mean, because an average
+            # lets three good corners hide the bad one.
+            "resolution": SHEET_RESOLUTION,
+            "symmetry_bonus": 5000.0,
+            "symmetry_span": 0.1,
             "asset_cfg": SceneEntityCfg("deformable"),
             "arm_cfg": SceneEntityCfg("mannequin_arm"),
         },
@@ -805,10 +821,36 @@ class SheetRewardsCfg:
         weight=-1.0,
     )
 
-    # The act that finishes the task, and the one that can ruin it. Opening the gripper below
-    # ``release_height`` is paid in proportion to how well the sheet is placed; opening it above is
-    # charged and the episode carries on, so where the sheet actually lands still decides the rest.
-    # Judged on the commanded bit, like ``gripper_recommit``.
+    # Driving a fingertip into the mannequin arm. Nothing else in the reward notices the arm at
+    # all -- it is kinematic and gravity-free, so a finger pushed into it neither moves it nor
+    # disturbs the cloth, and the run carries on as though nothing happened. On hardware that is
+    # the collision that ends the attempt, and the descent this task now asks for takes the fingers
+    # right past it.
+    #
+    # Charged per contact rather than per step: 800 every frame a pad rested on the arm would
+    # dwarf every other term within a second. Backing off and touching again is a second contact
+    # and is charged again, which is the intent -- each one is its own collision.
+    finger_touches_arm = RewTerm(
+        func=finger_arm_contact_penalty,
+        params={
+            "arm_radius": MANNEQUIN_ARM_RADIUS,
+            "arm_length": MANNEQUIN_ARM_LENGTH,
+            # same 5 mm the slot box test uses, so both fire a hair before a real touch
+            "margin": 0.005,
+            "penalty": 800.0,
+            "robot_cfg": SceneEntityCfg("robot"),
+            "arm_cfg": SceneEntityCfg("mannequin_arm"),
+            "finger_body_names": ("panda_leftfinger", "panda_rightfinger"),
+        },
+        # the term divides by dt internally and returns a positive magnitude, so the weight carries
+        # the sign and 800 above is the literal charge per contact
+        weight=-1.0,
+    )
+
+    # The act that finishes the task, and the one that can ruin it. Three bands of end-effector
+    # height decide which: at or below 0.1 the release is a placement and is paid; from there to
+    # 0.25 it is charged on a straight line up to 1000; above 0.25 it is an abort, charged 1500 and
+    # ending the episode. Judged on the commanded bit, like ``gripper_recommit``.
     release_stage = RewTerm(
         func=release_stage_reward,
         params={
@@ -819,35 +861,28 @@ class SheetRewardsCfg:
             "hand_body_name": "panda_hand",
             # same scale the dense term uses, so the two agree on what "close" means
             "std": 0.2,
-            # end-effector height, relative to the environment origin. The arm's top surface is at
-            # about 0.08, so this is roughly the last two centimetres of the descent -- tight on
-            # purpose, and the first number to loosen if the drape stalls with the sheet held.
+            # At or below this the release is a placement and the graded charge is zero. The arm's
+            # top surface is at 0.08, so this asks the policy to bring the sheet essentially onto
+            # the arm before letting go rather than laying it on from above.
             "release_height": 0.1,
-            # ...but only decides the outcome while the band is still uncovered. Once coverage is
-            # past this, opening the hand is a placement from wherever the hand is. Height alone
-            # could not tell a drape from a drop: holding the free edge of a 0.2 m sheet laid over
-            # an arm whose top is at 0.08 puts the grasp frame well above any ceiling tight enough
-            # to catch a real drop, so every release a draping policy could physically make was
-            # priced as a failure. Measured: 45% of each episode spent with the drape finished and
-            # the gripper shut. Kept equal to ``drape_stage``'s threshold.
-            "success_coverage": 0.2,
+            # ...and by here the charge has reached its full 1000. Between the two it is a straight
+            # line, which is the point: a single ceiling says only "wrong side of a line you cannot
+            # see", and gives the same answer for a centimetre too high as for thirty. Both flat
+            # versions were tried and both produced a policy that would not open its hand. A ramp
+            # answers the question the policy is actually asking -- how much lower -- and answers
+            # it on every release, including the bad ones.
+            "high_release_limit": 0.25,
             # Scaled by placement quality, so it is only worth taking once the sheet is over the
-            # band. NOT part of the brief: without something paid for letting go, holding a
-            # well-placed sheet forever scores exactly as well as draping it, and the policy has no
-            # reason to ever open the gripper. Set to 0.0 to score the drape on closeness alone.
+            # band. Without something paid for letting go, holding a well-placed sheet forever
+            # scores as well as draping it. Set to 0.0 to score the drape on closeness alone.
             "release_bonus": 500.0,
-            # Cut from 800 while the release itself is still unlearned: at 800 the one action the
-            # task needs was priced as more dangerous than anything else the policy could do, and
-            # every run showed the result -- zero commanded releases, ever. 300 still makes a drop
-            # from height clearly bad without making the gripper channel untouchable.
-            #
-            # Charged per event rather than latched, unlike the bonus beside it. That asymmetry was
-            # invisible while a high release ended the episode; now that it does not, a policy that
-            # re-grasps and drops again is charged again, which is the right reading -- each drop is
-            # its own mistake -- but it does mean the phase can cost more than 300 in total.
-            "high_release_penalty": 300.0,
+            "high_release_penalty": 1000.0,
+            # above the limit the release is an abort: charged this and the episode ends, via
+            # ``released_high``. Nothing useful follows a sheet thrown from that height, and the
+            # placement that results is decided by luck rather than by anything the policy did.
+            "abort_penalty": 1500.0,
         },
-        # the term divides by dt internally, so both magnitudes above are literal one-shot returns
+        # the term divides by dt internally, so all magnitudes above are literal one-shot returns
         weight=1.0,
     )
 
@@ -950,6 +985,10 @@ class SheetTerminationsCfg(TerminationsCfg):
 
     released_early = DoneTerm(func=released_before_extraction)
 
+    # phase two's counterpart, and now only the extreme case: a release from above
+    # ``high_release_limit``. Releases inside the graded band are charged and play on.
+    released_high = DoneTerm(func=released_too_high)
+
     # the one ending that is not a failure: the sheet has sat covered on the band for a full second
     draped = DoneTerm(func=drape_complete)
 
@@ -964,7 +1003,9 @@ class SheetTerminationsCfg(TerminationsCfg):
             ),
             "margin": 0.005,
             "robot_cfg": SceneEntityCfg("robot"),
-            "slot_cfgs": (SceneEntityCfg("slot_neg_y"), SceneEntityCfg("slot_pos_y")),
+            # a list rather than a tuple, for the Hydra-serialisation reason spelled out on the
+            # matching entry in ``reset_layout``
+            "slot_cfgs": [SceneEntityCfg("slot_neg_y"), SceneEntityCfg("slot_pos_y")],
             "finger_body_names": ("panda_leftfinger", "panda_rightfinger"),
         },
     )

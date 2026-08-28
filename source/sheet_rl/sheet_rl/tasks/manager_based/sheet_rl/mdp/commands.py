@@ -66,6 +66,38 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
         zeros = torch.zeros(self.num_envs, device=self.device)
         self._band_align_quat = quat_from_euler_xyz(zeros, zeros + torch.pi / 2, zeros)
 
+        # Optional correction for an arm whose centre line is not its root frame's x-axis. A capsule
+        # is straight, so for the base task this stays ``None`` and the band rides the axis exactly
+        # as before; a sculpted arm curves, and drawing the sleeve on the axis leaves it visibly
+        # hanging off one side of the limb.
+        self._centerline_x: torch.Tensor | None = None
+        self._centerline_yz: torch.Tensor | None = None
+        if cfg.band_centerline_offsets is not None:
+            samples = torch.tensor(
+                cfg.band_centerline_offsets, dtype=torch.float32, device=self.device
+            )
+            order = torch.argsort(samples[:, 0])
+            self._centerline_x = samples[order, 0].contiguous()
+            self._centerline_yz = samples[order, 1:].contiguous()
+
+    def _centerline_offset(self, along: torch.Tensor) -> torch.Tensor:
+        """Lateral offset of the arm's centre line at each band position, linearly interpolated.
+
+        Args:
+            along: Distance of each environment's band centre from the arm's origin, along the
+                arm's own axis [m]. Shape ``(num_envs,)``.
+
+        Returns:
+            The ``(y, z)`` offset to add in the arm's frame. Shape ``(num_envs, 2)``.
+        """
+        table_x, table_yz = self._centerline_x, self._centerline_yz
+        # clamp into the sampled span, so a band beyond the ends holds the last measured offset
+        # rather than extrapolating a curve that was never measured
+        index = torch.searchsorted(table_x, along.contiguous()).clamp(1, len(table_x) - 1)
+        low, high = table_x[index - 1], table_x[index]
+        weight = ((along - low) / (high - low)).clamp(0.0, 1.0).unsqueeze(-1)
+        return torch.lerp(table_yz[index - 1], table_yz[index], weight)
+
     def _resample_command(self, env_ids: Sequence[int]):
         arm_pos_w = self.arm.data.root_pos_w.torch[env_ids]
         arm_quat_w = self.arm.data.root_quat_w.torch[env_ids]
@@ -100,7 +132,14 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
         # visualiser callback so the region is shown whether or not debug_vis is enabled.
         arm_pos_w = self.arm.data.root_pos_w.torch
         arm_quat_w = self.arm.data.root_quat_w.torch
-        band_pos_w = arm_pos_w + quat_apply(arm_quat_w, self.band_offset_b)
+        band_offset_b = self.band_offset_b
+        if self._centerline_x is not None:
+            # slide the sleeve sideways onto the limb's real centre line. Only the marker moves --
+            # ``goal_offset_b``, and the capsule the reward terms build about the arm's root axis,
+            # are deliberately left alone, so this changes what is drawn and nothing that is scored.
+            band_offset_b = band_offset_b.clone()
+            band_offset_b[:, 1:] = self._centerline_offset(band_offset_b[:, 0])
+        band_pos_w = arm_pos_w + quat_apply(arm_quat_w, band_offset_b)
         band_quat_w = quat_mul(arm_quat_w, self._band_align_quat)
         self.band_visualizer.visualize(translations=band_pos_w, orientations=band_quat_w)
 
@@ -139,4 +178,21 @@ class ArmDrapePoseCommandCfg(DeformableUniformPoseCommandCfg):
     Purely visual -- no rigid or collision properties -- so the sheet drapes over the arm itself
     and the band never perturbs the physics. Keep the radius a millimetre or so above the arm's so
     it reads as paint; :attr:`height` is the region's extent along the arm.
+    """
+
+    band_centerline_offsets: tuple[tuple[float, float, float], ...] | None = None
+    """Samples of the arm's true centre line in its own frame, as ``(x, y, z)`` triples [m].
+
+    ``None`` -- the default -- draws the band on the root frame's x-axis, which is exactly right for
+    a capsule, since a capsule's centre line *is* that axis.
+
+    A sculpted arm is not straight. Its cross-section centroid wanders off the root axis as the limb
+    curves, so a sleeve pinned to the axis hangs off one side of the surface. Give the measured
+    centroid at a few stations along the arm and the sleeve is slid sideways onto the real centre
+    line, interpolating linearly between them and holding the end values beyond the sampled span.
+
+    Only the marker is moved. The goal point and the analytic capsule the reward terms build are
+    still taken about the root axis, so this changes what is drawn and nothing that is scored --
+    which is also the caveat: on a markedly curved arm the drawn band and the scored region drift
+    apart by however far the centre line strays.
     """

@@ -21,3 +21,15 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
     },
 )
+
+# the same task with a cosmetic mannequin hand on a random end of the arm. A separate id so the
+# base task -- and any training running against it -- is untouched by hand experiments.
+gym.register(
+    id="Template-Sheet-Rl-Hand-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.sheet_rl_hand_env_cfg:SheetRlHandEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
+    },
+)
