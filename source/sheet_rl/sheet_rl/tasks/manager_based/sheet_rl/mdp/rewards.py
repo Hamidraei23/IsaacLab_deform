@@ -13,6 +13,8 @@ import torch
 from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 from isaaclab.utils.math import quat_apply, wrap_to_pi
 
+from .events import resolve_arm_radius
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -185,6 +187,32 @@ def _closing_squareness(
     return (closing * lateral).sum(-1).abs()
 
 
+def _arm_radius(
+    env: ManagerBasedRLEnv, fallback: float, trailing_dims: int
+) -> torch.Tensor | float:
+    """The arm's radius, shaped to broadcast against a tensor with ``trailing_dims`` axes after env.
+
+    Every term that models the arm as a capsule takes a radius as a scalar parameter, which is right
+    until the radius is randomised per environment -- from then on, scoring against the nominal
+    value measures a limb that is not there and the randomisation shows up as noise on the reward
+    instead of a property to generalise over. This returns the per-environment radius where one
+    exists and the configured scalar where it does not, so both cases run the same arithmetic.
+
+    Args:
+        env: The environment.
+        fallback: The scalar radius the term was configured with [m].
+        trailing_dims: How many axes follow the environment axis in the tensor it must broadcast
+            against -- 1 for ``(num_envs, num_points)``, 3 for a ``(num_envs, a, b, 3)`` sample grid.
+
+    Returns:
+        A view of shape ``(num_envs, 1, ...)``, or ``fallback`` unchanged when never randomised.
+    """
+    radius = resolve_arm_radius(env, fallback)
+    if isinstance(radius, torch.Tensor):
+        return radius.view(-1, *([1] * trailing_dims))
+    return radius
+
+
 def _band_frame(
     env: ManagerBasedRLEnv, command_name: str, arm_cfg: SceneEntityCfg
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -217,8 +245,13 @@ def _goal_point(
     """
     command = env.command_manager.get_term(command_name)
     arm: RigidObject = env.scene[arm_cfg.name]
+    # ``goal_offset_b`` has a +z lift that puts the goal above the arm's surface, so it must be
+    # mapped through the same task frame the command sampled it in rather than through the body's
+    # own orientation. The two differ only when the asset is mounted rotated in its body, and there
+    # the body frame would carry the lift around with the mount -- underneath the arm for a limb
+    # turned palm-up -- scoring against a point the command never placed.
     return arm.data.root_pos_w.torch + quat_apply(
-        arm.data.root_quat_w.torch, command.goal_offset_b
+        command.arm_task_quat_w(), command.goal_offset_b
     )
 
 
@@ -355,7 +388,7 @@ def band_coverage(
     radial = torch.cos(theta).view(1, 1, num_angular, 1) * radial_up.view(
         num_envs, 1, 1, 3
     ) + torch.sin(theta).view(1, 1, num_angular, 1) * side.view(num_envs, 1, 1, 3)
-    samples = center.view(num_envs, 1, 1, 3) + along + band_radius * radial
+    samples = center.view(num_envs, 1, 1, 3) + along + _arm_radius(env, band_radius, 3) * radial
     samples = samples.reshape(num_envs, num_axial * num_angular, 3)
 
     nearest = torch.cdist(samples, nodes).min(dim=-1).values
@@ -762,6 +795,20 @@ class gripper_recommit_penalty(ManagerTermBase):
     A grasp needs no toggle at all if the policy simply keeps the reset width and closes when it
     arrives, so the floor really is zero rather than one closure's worth.
 
+    Charged during the extraction only. Re-committing is a phase-one mistake: there is one sheet in
+    one slot, the first attempt is the one worth aiming, and a second bite means the first missed.
+    After the sheet is out, the same act means something else entirely -- the policy is being asked
+    to *open* over the band, and the terms that price that (:class:`release_stage_reward` on the
+    height it opens at, :class:`gripper_closed_near_band` and
+    :class:`closed_over_finished_drape` on the hesitation before it) already say everything the task
+    wants said about the gripper in phase two. Leaving a flat per-closure charge running on top of
+    them taxes the release itself, since letting go and re-shutting is two events where the first is
+    the one being asked for.
+
+    The free closure is the first of the *episode*, and it is always spent in phase one: extraction
+    requires the sheet in the fingers, so there is no way to reach phase two without having closed
+    at least once.
+
     Note:
         Divided by ``step_dt`` so :paramref:`penalty` is the literal charge per re-closure, rather
         than being scaled down by the reward manager's ``weight * dt``.
@@ -769,6 +816,7 @@ class gripper_recommit_penalty(ManagerTermBase):
     Args:
         env: The environment.
         penalty: Charge for each closure after the first in an episode [reward].
+        phase_one_only: Stop charging once the sheet is clear of the slot.
         action_term_name: Action term carrying the binary gripper channel.
     """
 
@@ -784,6 +832,9 @@ class gripper_recommit_penalty(ManagerTermBase):
         # cycle is the free one
         self._was_open = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         self._closures = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
+        # closures actually billed, which the phase gate makes a strict subset of the above rather
+        # than simply one fewer. Logged separately so the diagnostic says what was charged.
+        self._billed = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
@@ -792,16 +843,17 @@ class gripper_recommit_penalty(ManagerTermBase):
         # closure count is several times the width-based ``Events/closures`` and is the one this
         # term bills
         extras = self._env.extras.setdefault("log", {})
-        counts = self._closures[env_ids].float()
-        extras["Events/gripper_closures_raw"] = counts.mean()
-        extras["Events/gripper_recommits"] = (counts - 1.0).clamp(min=0.0).mean()
+        extras["Events/gripper_closures_raw"] = self._closures[env_ids].float().mean()
+        extras["Events/gripper_recommits"] = self._billed[env_ids].float().mean()
         self._closures[env_ids] = 0
+        self._billed[env_ids] = 0
         self._was_open[env_ids] = False
 
     def __call__(
         self,
         env: ManagerBasedRLEnv,
-        penalty: float = 120.0,
+        penalty: float = 400.0,
+        phase_one_only: bool = True,
         action_term_name: str = "gripper_action",
     ) -> torch.Tensor:
         raw = self._action_term.raw_actions[:, 0]
@@ -810,6 +862,11 @@ class gripper_recommit_penalty(ManagerTermBase):
         self._closures += closure
         # the count already includes this step, so ">1" is exactly "not the first of the episode"
         charged = closure & (self._closures > 1)
+        if phase_one_only:
+            # the extraction only: after the sheet is out, the gripper is priced by the terms that
+            # ask it to open rather than by a flat charge for shutting
+            charged = charged & ~_phase_reached(env)
+        self._billed += charged
         self._was_open = is_open
         return -penalty * charged.float() / env.step_dt
 
@@ -1330,6 +1387,147 @@ class release_stage_reward(ManagerTermBase):
         return reward / env.step_dt
 
 
+class release_retreat_progress(ManagerTermBase):
+    """Ratcheted pull upward, away from the drape, measured from wherever the hand let go.
+
+    Opening the gripper is not the end of the manoeuvre. The hand is left a few centimetres above a
+    sheet it has just laid down, and the settling second :class:`drape_milestones` requires has to
+    happen with the fingers still there -- brushing the cloth, or simply blocking the drape from
+    settling the way it would if the arm were gone. Nothing else in the task asks the robot to
+    leave: :class:`band_detach_penalty` charges the *sheet* for coming off the band, and the dwell
+    counter notices a retreat only indirectly, as coverage falling while the arm drags the cloth
+    with it. This asks for the withdrawal directly.
+
+    The target is latched, not standing: the first release of phase two records the end-effector
+    frame and fixes a goal :paramref:`retreat_height` directly above it. Every step after that is
+    scored on ``exp(-d / std)`` for the distance to that fixed point, normalised so it reads zero at
+    the release itself and one at the goal, and the episode is paid only the amount by which the
+    current value exceeds the best it has ever reached. That is the same ratchet
+    :class:`band_approach_progress` uses, for the same reason: a level reward for being clear of the
+    sheet is an annuity, and one collected by a policy that opens its hand early and then hovers out
+    of the way for four hundred steps. Under the ratchet, holding still pays nothing, dipping back
+    down and climbing again pays nothing for ground already bought, and the episode total is bounded
+    by :paramref:`max_reward` no matter how the arm moves.
+
+    Latched **once**, on the first release. A target that re-armed on every opening would be worth
+    ``max_reward`` again each time: close the hand, drop ten centimetres, open, climb back -- the
+    high-water mark is against a goal that moved down with the hand, so the same twenty centimetres
+    of travel could be sold repeatedly. Fixing the goal at the first release makes the budget what
+    it says it is, and re-grasping then costs the policy the dwell counter for nothing.
+
+    Distance is measured to a *point*, not to a height, which is deliberate. A pure height test is
+    satisfied by an arm that rises while sliding sideways across the drape, and sideways at ten
+    centimetres over a freshly laid sheet is exactly the motion that pulls it off the band. Asking
+    for the point directly overhead makes the straight-up withdrawal the cheapest way to collect.
+
+    Note:
+        Armed on the *commanded* gripper bit rather than the measured finger width, matching
+        :class:`release_stage_reward` -- the command is what the policy controls and the width is a
+        lagging shadow of it -- and only while the sheet was held on the previous step, so an empty
+        hand opening over the table arms nothing.
+
+    Note:
+        Scored only on steps where the sheet is *not* in the fingers, judged on the same capture
+        test :class:`grasp_stage_reward` publishes. A hand that opens, closes again on the cloth and
+        then climbs has not retreated from anything -- it has picked the drape back up -- and that
+        is the only way the twenty centimetres could be collected without the hand ever leaving the
+        sheet. The high-water mark is untouched while the sheet is held, so a genuine release
+        afterwards is still paid for the ground it gains.
+
+    Note:
+        Divided by ``step_dt`` so :paramref:`max_reward` is the literal total for a full retreat.
+
+    Args:
+        env: The environment.
+        robot_cfg: The robot.
+        hand_body_name: Body the end-effector frame hangs off.
+        grasp_offset: End-effector frame offset in the hand's frame [m].
+        action_term_name: Action term carrying the binary gripper channel.
+        retreat_height: How far above the release point the goal sits [m].
+        std: Distance over which closeness to the goal decays by a factor of e [m]. Wants to be
+            well under :paramref:`retreat_height`, or the reward is nearly flat across the whole
+            climb and says little about progress.
+        max_reward: Total paid for going from the release point to the goal [reward].
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        params = cfg.params
+        self._robot: Articulation = env.scene[params["robot_cfg"].name]
+        self._hand_id = self._robot.body_names.index(params.get("hand_body_name", "panda_hand"))
+
+        action_term = env.action_manager.get_term(params.get("action_term_name", "gripper_action"))
+        self._action_term = action_term
+        # read off the action term rather than restated here, so the two cannot come to disagree
+        # about which sign of the channel means open
+        self._threshold = float(action_term.cfg.threshold)
+        self._positive = bool(action_term.cfg.positive_threshold)
+
+        zeros = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._was_holding = zeros.clone()
+        # whether the goal has been latched this episode; until it is, there is nothing to score
+        self._armed = zeros.clone()
+        self._goal = torch.zeros(env.num_envs, 3, device=env.device)
+        self._best = torch.zeros(env.num_envs, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        # how much of the retreat budget the episode collected, as a fraction. Zero on an episode
+        # that never released at all, which the release counters already distinguish.
+        extras["Events/retreat_earned"] = self._best[env_ids].mean()
+        self._best[env_ids] = 0.0
+        self._armed[env_ids] = False
+        self._goal[env_ids] = 0.0
+        self._was_holding[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        robot_cfg: SceneEntityCfg,
+        hand_body_name: str = "panda_hand",
+        grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.1034),
+        action_term_name: str = "gripper_action",
+        retreat_height: float = 0.2,
+        std: float = 0.1,
+        max_reward: float = 1000.0,
+    ) -> torch.Tensor:
+        pose = self._robot.data.body_link_pose_w.torch[:, self._hand_id]
+        offset = torch.tensor(grasp_offset, device=pose.device).expand(len(pose), 3)
+        tip = pose[:, :3] + quat_apply(pose[:, 3:7], offset)
+
+        raw = self._action_term.raw_actions[:, 0]
+        is_open = raw > self._threshold if self._positive else raw < self._threshold
+
+        # the first release of phase two, and only the first: a goal that re-armed on every
+        # opening could be sold the same climb twice over
+        releasing = self._was_holding & _phase_reached(env) & is_open & ~self._armed
+        rise = torch.tensor([0.0, 0.0, retreat_height], device=tip.device).expand(len(tip), 3)
+        self._goal = torch.where(releasing.unsqueeze(-1), tip + rise, self._goal)
+        self._armed |= releasing
+
+        distance = (self._goal - tip).norm(dim=-1)
+        # normalised against the closeness the release point itself has, so the term reads zero
+        # there and one on the goal, and max_reward is the literal total rather than a budget the
+        # policy can only ever collect the top slice of
+        base = math.exp(-retreat_height / std)
+        closeness = (torch.exp(-distance / std) - base) / max(1.0 - base, 1e-6)
+        # nothing is owed for a climb made with the cloth back in the fingers: that is not a
+        # retreat, it is picking the drape up again, and it is the one way twenty centimetres of
+        # travel could otherwise be collected without the hand ever leaving the sheet
+        scored = self._armed & ~_is_holding(env)
+        closeness = closeness.clamp(0.0, 1.0) * scored.float()
+
+        gain = (closeness - self._best).clamp(min=0.0)
+        self._best = torch.maximum(self._best, closeness)
+
+        # cloned: the flag is a single tensor the grasp term overwrites in place every step
+        self._was_holding = _is_holding(env).clone()
+
+        return gain * max_reward / env.step_dt
+
+
 class drape_failure_penalty(ManagerTermBase):
     """Charge levied on any episode that ends without the sheet on the red band.
 
@@ -1513,7 +1711,7 @@ class table_drop_penalty(ManagerTermBase):
         offset = nodes - center.unsqueeze(1)
         along = (offset * axis.unsqueeze(1)).sum(-1).clamp(-0.5 * arm_length, 0.5 * arm_length)
         radial = (offset - along.unsqueeze(-1) * axis.unsqueeze(1)).norm(dim=-1)
-        clear = (radial - arm_radius).min(dim=1).values > touch_margin
+        clear = (radial - _arm_radius(env, arm_radius, 1)).min(dim=1).values > touch_margin
 
         down = _phase_reached(env) & ~_is_holding(env) & flat & clear
         # consecutive, not cumulative: a frame that fails any condition puts the count back to zero
@@ -1560,10 +1758,10 @@ class drape_milestones(ManagerTermBase):
     pass the coverage bar on its way *off* the arm just as easily as on its way onto it, and a
     success declared the instant the bar is crossed cannot tell the two apart -- it ends the episode
     before the physics has said which one happened, and pays 8000 for a drape that would have slid
-    onto the table half a second later. Requiring the state to hold for a full second after the
+    onto the table half a second later. Requiring the state to hold for two full seconds after the
     gripper opens is what makes the bonus a payment for a drape that *stays*. The counter is
     consecutive: any step that breaks the condition -- coverage falling back under the bar, or the
-    gripper closing on the sheet again -- puts it back to zero, so the second cannot be accumulated
+    gripper closing on the sheet again -- puts it back to zero, so the dwell cannot be accumulated
     out of scattered good frames.
 
     The dwell also prices leaving. Nothing forces the robot to hold still during it, but the arm
@@ -1901,7 +2099,7 @@ class finger_arm_contact_penalty(ManagerTermBase):
         along = (offset * axis.unsqueeze(1)).sum(-1).clamp(-0.5 * arm_length, 0.5 * arm_length)
         radial = (offset - along.unsqueeze(-1) * axis.unsqueeze(1)).norm(dim=-1)
 
-        touching = (radial - arm_radius) < margin
+        touching = (radial - _arm_radius(env, arm_radius, 1)) < margin
         # edge-triggered: only the step a pad arrives is charged
         arrived = touching & ~self._touching
         self._touching = touching

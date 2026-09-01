@@ -14,10 +14,18 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.configclass import configclass
-from isaaclab.utils.math import quat_apply, quat_from_euler_xyz, quat_mul, subtract_frame_transforms
+from isaaclab.utils.math import (
+    quat_apply,
+    quat_conjugate,
+    quat_from_euler_xyz,
+    quat_mul,
+    subtract_frame_transforms,
+)
 
 from isaaclab_tasks.core.lift.mdp.commands.pose_commands import DeformableUniformPoseCommand
 from isaaclab_tasks.core.lift.mdp.commands.pose_commands_cfg import DeformableUniformPoseCommandCfg
+
+from .events import resolve_arm_radius
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -70,6 +78,16 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
         # is straight, so for the base task this stays ``None`` and the band rides the axis exactly
         # as before; a sculpted arm curves, and drawing the sleeve on the axis leaves it visibly
         # hanging off one side of the limb.
+        # Fixed body-frame rotation between the arm's *task* frame and the pose its rigid body
+        # actually carries. ``None`` -- the default -- means the two coincide and the body's own
+        # orientation is the task frame, which is the case for every asset mounted as authored.
+        self._arm_mount_conj: torch.Tensor | None = None
+        if cfg.arm_mount_quat is not None:
+            mount = torch.tensor(cfg.arm_mount_quat, dtype=torch.float32, device=self.device)
+            self._arm_mount_conj = (
+                quat_conjugate(mount.unsqueeze(0)).expand(self.num_envs, 4).contiguous()
+            )
+
         self._centerline_x: torch.Tensor | None = None
         self._centerline_yz: torch.Tensor | None = None
         if cfg.band_centerline_offsets is not None:
@@ -79,6 +97,29 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
             order = torch.argsort(samples[:, 0])
             self._centerline_x = samples[order, 0].contiguous()
             self._centerline_yz = samples[order, 1:].contiguous()
+
+    def arm_task_quat_w(self, env_ids: Sequence[int] | slice = slice(None)) -> torch.Tensor:
+        """The arm's *task* frame in world coordinates, with any mounting rotation stripped off.
+
+        Everything the policy sees about the arm comes through this frame, so it must depend only on
+        where the arm has been placed and not on how the asset happens to be mounted in its body.
+        The body pose is ``task * mount``: the reset composes its world yaw onto the configured spawn
+        orientation, so right-multiplying by the mount's conjugate recovers the yaw alone.
+
+        Without this, turning the asset over in its body would rewrite the goal command -- both the
+        published orientation and the lift that puts the goal *above* the arm rather than under it --
+        and a policy trained against the old frame reads a target it has never seen.
+
+        Args:
+            env_ids: Environments to return the frame for. Defaults to all of them.
+
+        Returns:
+            Orientation of the arm's task frame as ``(w, x, y, z)``. Shape ``(len(env_ids), 4)``.
+        """
+        body_quat_w = self.arm.data.root_quat_w.torch[env_ids]
+        if self._arm_mount_conj is None:
+            return body_quat_w
+        return quat_mul(body_quat_w, self._arm_mount_conj[env_ids])
 
     def _centerline_offset(self, along: torch.Tensor) -> torch.Tensor:
         """Lateral offset of the arm's centre line at each band position, linearly interpolated.
@@ -100,7 +141,9 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
 
     def _resample_command(self, env_ids: Sequence[int]):
         arm_pos_w = self.arm.data.root_pos_w.torch[env_ids]
-        arm_quat_w = self.arm.data.root_quat_w.torch[env_ids]
+        # the task frame, not the body's own orientation -- see :meth:`arm_task_quat_w`. For an
+        # as-authored asset the two are the same tensor and nothing below changes.
+        arm_quat_w = self.arm_task_quat_w(env_ids)
 
         # ranges are an offset in the arm frame: x runs along the arm, z lifts off its surface
         local = torch.zeros(len(env_ids), 3, device=self.device)
@@ -141,7 +184,21 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
             band_offset_b[:, 1:] = self._centerline_offset(band_offset_b[:, 0])
         band_pos_w = arm_pos_w + quat_apply(arm_quat_w, band_offset_b)
         band_quat_w = quat_mul(arm_quat_w, self._band_align_quat)
-        self.band_visualizer.visualize(translations=band_pos_w, orientations=band_quat_w)
+
+        # Track a randomised arm thickness, so the sleeve keeps hugging the surface instead of being
+        # swallowed by a fattened arm or left hanging off a thinned one. Radial only: the marker's
+        # local z was rotated onto the arm's axis above and carries the band's width, which is a
+        # task constant and must not scale with the limb.
+        scales = None
+        if self.cfg.arm_nominal_radius is not None:
+            radius = resolve_arm_radius(self._env, self.cfg.arm_nominal_radius)
+            if isinstance(radius, torch.Tensor):
+                ratio = (radius / self.cfg.arm_nominal_radius).unsqueeze(-1)
+                scales = torch.cat([ratio, ratio, torch.ones_like(ratio)], dim=-1)
+
+        self.band_visualizer.visualize(
+            translations=band_pos_w, orientations=band_quat_w, scales=scales
+        )
 
 
 @configclass
@@ -156,6 +213,36 @@ class ArmDrapePoseCommandCfg(DeformableUniformPoseCommandCfg):
 
     arm_name: str = "mannequin_arm"
     """Scene entity of the arm the goal is placed on."""
+
+    arm_nominal_radius: float | None = None
+    """Arm radius the band marker was sized against [m]. ``None`` disables marker scaling.
+
+    Only consulted when the arm's radius has been randomised per environment. The marker is one
+    instanced prototype at a fixed radius, so without this a thickness-randomised arm would show the
+    same sleeve everywhere -- buried in the fattened environments, standing clear of the thinned
+    ones. Given the nominal, each instance is scaled radially by its own arm's ratio to it.
+
+    Purely cosmetic: it scales what is drawn and nothing that is scored, since the reward terms read
+    the per-environment radius directly.
+    """
+
+    arm_mount_quat: tuple[float, float, float, float] | None = None
+    """Fixed rotation baked into the arm's spawn orientation, as ``(w, x, y, z)``. Body frame.
+
+    ``None`` -- the default -- means the body *is* the task frame, which is the case whenever the
+    asset is spawned as authored. Set it to whatever ``init_state.rot`` the arm carries and the
+    command works in the frame the arm would have had without it.
+
+    This exists to keep the goal command invariant under a purely presentational change to the arm.
+    The command publishes the arm's orientation as four of its seven dimensions, and derives the
+    goal point by lifting off the arm along that frame's +z, so re-mounting the asset -- turning it
+    palm-up, say -- would both hand the policy a quaternion it never saw in training and push the
+    goal through the arm to the underside. Declaring the mount here leaves both untouched.
+
+    Only what the policy is scored and steered by is corrected. The band marker is still drawn from
+    the body's true pose, because :attr:`band_centerline_offsets` are measured in the asset's own
+    frame and have to turn with it to stay on the limb.
+    """
 
     band_visualizer_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
         prim_path="/Visuals/Command/target_band",

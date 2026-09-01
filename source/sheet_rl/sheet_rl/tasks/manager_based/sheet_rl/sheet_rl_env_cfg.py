@@ -48,6 +48,7 @@ from isaaclab_tasks.utils import PresetCfg
 
 from .mdp import (
     ArmDrapePoseCommandCfg,
+    randomize_arm_radius,
     band_approach_progress,
     closed_over_finished_drape,
     timeout_still_gripping,
@@ -66,6 +67,7 @@ from .mdp import (
     grasp_stage_reward,
     gripper_recommit_penalty,
 
+    release_retreat_progress,
     release_stage_reward,
     released_before_extraction,
     released_too_high,
@@ -87,14 +89,40 @@ POSE_XY_RANGE = 0.12
 YAW_RANGE = (-math.pi / 2, math.pi / 2)
 """Yaw bound applied to both the arm and the sheet at reset [rad]."""
 
+ARM_RADIUS_JITTER = 0.20
+"""Fractional half-range the arm capsule's radius is drawn over, so +/-20% of the nominal.
+
+At the nominal 0.04 m that spans 0.032 to 0.048 m. Sized against the sculpted evaluation asset
+rather than picked round: the real forearm runs 0.026 m at the wrist to 0.059 m at the elbow, so a
+policy trained on one radius meets a limb it has never seen the moment it is scored on the mesh.
++/-20% does not cover that whole spread -- nothing a single capsule could -- but it is the
+difference between a policy that has generalised over thickness and one that has not.
+
+Unlike the entries above this is drawn **once per environment at start-up**, not at each reset: a
+collider cannot be resized while the simulation runs, so :func:`randomize_arm_radius` writes it into
+the Newton model just after the model is finalised and it then holds for the run. Across a large
+batch the policy still sees the whole distribution, each environment simply holds its own draw.
+
+Set to 0.0 to give every environment the nominal radius while leaving the term installed. That is
+not an escape hatch for a task whose arm is not a capsule: the term raises on finding no capsule to
+resize, before it ever reads this, so a mesh-collided arm has to drop the term instead. See
+``SheetRlHandEnvCfg.__post_init__``, which does exactly that.
+"""
+
 EPISODE_STEPS = 500
 """Episode length in environment steps, at the 30 Hz control rate."""
 
-DRAPE_SETTLE_STEPS = 30
+DRAPE_SETTLE_STEPS = 60
 """How long a finished drape must hold before it is scored a success [steps].
 
-One second at the 30 Hz control rate, and a twentieth of the episode -- long enough for the cloth
+Two seconds at the 30 Hz control rate, and a twelfth of the episode -- long enough for the cloth
 to have visibly stopped moving, short enough that the wait is not itself an obstacle.
+
+Raised from one second. The wait is what separates a drape that stays put from one passing through
+the coverage threshold on its way off the arm, so a longer dwell is a stricter test: slow slides
+that used to clear a 30-step window now have time to fall back under the bar and restart the count.
+It also shortens the coverage annuity by 30 steps, which slightly widens the gap the drape bonus has
+to beat -- see the sizing note on that term.
 """
 
 ##
@@ -375,7 +403,23 @@ class SheetScenePresetCfg(PresetCfg):
 
 @configclass
 class SheetEventCfg:
-    """Reset events: robot to its default configuration, sheet flat on the table."""
+    """Reset events: robot to its default configuration, sheet flat on the table.
+
+    Plus one start-up term. ``randomize_arm_radius`` runs in ``startup`` mode -- once, after the
+    Newton model is finalised and before the first reset -- because a collider's size can only be
+    changed by writing the model directly, and it must be in place before ``reset_layout`` seats
+    each arm at its own radius.
+    """
+
+    randomize_arm_radius = EventTerm(
+        func=randomize_arm_radius,
+        mode="startup",
+        params={
+            "nominal_radius": MANNEQUIN_ARM_RADIUS,
+            "jitter": ARM_RADIUS_JITTER,
+            "asset_cfg": SceneEntityCfg("mannequin_arm"),
+        },
+    )
 
     reset_robot_arm_joints = EventTerm(
         func=mdp.reset_joints_by_scale,
@@ -439,8 +483,9 @@ class SheetRewardsCfg:
 
     **Phase two -- drape.** Latched the instant the sheet clears the walls, which is where phase
     one's terms stop paying and where the episode used to end. ``drape_closeness`` pulls the
-    sheet's centre onto the centre of the red band, and ``release_stage`` pays for opening the
-    gripper over it -- or charges for dropping it from height.
+    sheet's centre onto the centre of the red band, ``release_stage`` pays for opening the gripper
+    over it -- or charges for dropping it from height -- and ``release_retreat`` pays for taking the
+    hand back up out of the way afterwards, so the drape settles without the fingers in it.
 
     Every phase-one term carries a ``phase_one_only`` gate rather than being left to run. Two of
     them actively fight the drape -- ``alignment`` and ``square_progress`` pay for a wrist held
@@ -448,8 +493,11 @@ class SheetRewardsCfg:
     other two would pay a near-constant offset for the rest of the episode, diluting the only
     signal phase two has.
 
-    ``table_clearance``, ``ee_speed`` and ``gripper_recommit`` are ungated on purpose: they are
-    safety and regularisation, not task shaping, and they mean the same thing in both phases.
+    ``table_clearance`` and ``ee_speed`` are ungated on purpose: they are safety and
+    regularisation, not task shaping, and they mean the same thing in both phases.
+    ``gripper_recommit`` is not among them. It reads as regularisation but is not -- charging every
+    re-closure is a phase-one statement about taking a second bite at the pick, and in phase two the
+    same act is half of the release the task is trying to elicit, so it carries the gate too.
     """
 
     # -- getting into position
@@ -562,14 +610,29 @@ class SheetRewardsCfg:
         weight=0.0,
     )
 
-    # Every closure after the first, counted on the commanded bit rather than on the measured
-    # finger width. The gripper is one binary channel driven by the sign of a Gaussian sample, so
-    # the command toggles several times more often than the joints do; this charges the decision
-    # to take a second bite rather than the flicker underneath it. The first closure is free, so a
-    # policy that arrives lined up and shuts once pays nothing at all.
+    # Every closure after the first *during the extraction*, counted on the commanded bit rather
+    # than on the measured finger width. The gripper is one binary channel driven by the sign of a
+    # Gaussian sample, so the command toggles several times more often than the joints do; this
+    # charges the decision to take a second bite rather than the flicker underneath it. The first
+    # closure is free, so a policy that arrives lined up and shuts once pays nothing at all.
+    #
+    # Phase one only, unlike the version that ran across the whole episode. Re-committing is a
+    # phase-one mistake -- one sheet, one slot, and a second bite means the first missed -- but
+    # after extraction the task is asking the gripper to *open*, and a flat charge for shutting
+    # taxes the release itself, since letting go and re-shutting is two events of which the first
+    # is the one wanted. ``release_stage`` prices the height it opens at and ``hold_over_band`` and
+    # ``blocked_by_gripper`` price the hesitation before it; that is the whole of what phase two
+    # has to say about the gripper.
+    #
+    # Raised from 120 now that it is confined to the pick, where aiming is solved and a second bite
+    # is a mistake rather than the expected outcome. It also has to stay legible against the 4000
+    # extraction bonus: at 120 a policy could spam thirty extra closures and still come out ahead
+    # on the pick alone. Watch ``Events/gripper_recommits``, which now counts only what was billed,
+    # and ``Events/closures`` -- the latter collapsing towards zero is the old failure returning,
+    # a charge large enough that never closing became the better bet.
     gripper_recommit = RewTerm(
         func=gripper_recommit_penalty,
-        params={"penalty": 120.0},
+        params={"penalty": 400.0, "phase_one_only": True},
         # the term divides by dt internally, so the magnitude above is the literal charge
         weight=1.0,
     )
@@ -604,7 +667,12 @@ class SheetRewardsCfg:
             "bad_closure_penalty": 200.0,
             "premature_release_penalty": 500.0,
             "slot_clear_height": SLOT_CLEAR_HEIGHT,
-            "extraction_bonus": 1000.0,
+            # Raised from 1000. Extraction is the gate everything in phase two sits behind -- no
+            # drape shaping, no coverage, no success bonus is payable until this fires -- so the
+            # pick has to be worth attempting on its own before the policy has ever seen what
+            # follows it. At 1000 it was worth about as much as one good stretch of the coverage
+            # annuity; at 4000 it is the largest single payout in phase one by a wide margin.
+            "extraction_bonus": 4000.0,
         },
         # the term divides by dt internally, so every magnitude above is the literal reward
         weight=1.0,
@@ -734,7 +802,7 @@ class SheetRewardsCfg:
             # all peak at ~0.43 mean coverage, so 0.2 is a bar the existing behaviour clears
             # while still requiring a real drape rather than a graze.
             "success_coverage": 0.2,
-            # The drape has to survive a second on its own before it scores. Coverage crossing the
+            # The drape has to survive two seconds on its own before it scores. Coverage crossing the
             # bar says nothing about which direction the sheet is travelling: a cloth sliding off
             # the arm passes 0.2 on the way down exactly as it does on the way up, and terminating
             # on the crossing pays the bonus for the first without ever seeing the second. The wait
@@ -886,6 +954,41 @@ class SheetRewardsCfg:
         weight=1.0,
     )
 
+    # Get the hand out of the way once it has let go. The settling second ``drape_stage`` requires
+    # runs with the fingers still sitting a few centimetres over the cloth, where they brush it and
+    # hold it off the shape it would otherwise fall into; nothing else in the task asks the robot to
+    # leave. The first release of phase two fixes a goal 0.2 m straight above wherever the hand
+    # opened, and the climb to it is worth 1000.
+    #
+    # Ratcheted like ``drape_closeness``, and for the same reason: a level reward for standing clear
+    # is an annuity, and the cheapest way to collect it is to open early and hover. Under the ratchet
+    # the episode is paid only what it adds to its best-ever closeness, so holding position pays
+    # nothing, and the 1000 is a per-episode ceiling however the arm moves.
+    #
+    # The goal is latched on the *first* release only. Re-arming on every opening would let the same
+    # twenty centimetres be sold repeatedly -- close, sink, open, climb -- against a goal that moved
+    # down with the hand each time.
+    release_retreat = RewTerm(
+        func=release_retreat_progress,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "hand_body_name": "panda_hand",
+            "action_term_name": "gripper_action",
+            # measured to the point 0.2 m directly overhead, not to a height: a pure height test is
+            # satisfied by an arm rising while it slides sideways over the drape, which is the
+            # motion that drags the sheet off the band
+            "retreat_height": 0.2,
+            # half the climb. Wants to stay well under ``retreat_height`` -- at 0.2 the exponential
+            # is nearly flat across the whole retreat and says little about progress along it.
+            "std": 0.1,
+            # the TOTAL for the full climb, not a per-step rate. Normalised internally so this is
+            # the literal budget: the term reads zero at the release point and one on the goal.
+            "max_reward": 4000.0,
+        },
+        # the term divides by dt internally, so max_reward above is the literal total
+        weight=1.0,
+    )
+
     # The sheet on the floor: out of the gripper, flat on the table and nowhere near the arm. Paid
     # on top of ``drape_failure``, which charges 1100 on whatever ending does arrive, so a dropped
     # sheet costs 1600 against the 1100 an episode that times out still holding it pays. That gap is
@@ -989,7 +1092,7 @@ class SheetTerminationsCfg(TerminationsCfg):
     # ``high_release_limit``. Releases inside the graded band are charged and play on.
     released_high = DoneTerm(func=released_too_high)
 
-    # the one ending that is not a failure: the sheet has sat covered on the band for a full second
+    # the one ending that is not a failure: the sheet has sat covered on the band for two full seconds
     draped = DoneTerm(func=drape_complete)
 
     finger_touched_slot = DoneTerm(
@@ -1029,6 +1132,8 @@ class SheetCommandsCfg:
         asset_name="robot",
         object_name="deformable",
         arm_name="mannequin_arm",
+        # lets the red sleeve follow a thickness-randomised arm; visual only
+        arm_nominal_radius=MANNEQUIN_ARM_RADIUS,
         resampling_time_range=(5.0, 5.0),
         debug_vis=True,
         # offsets in the arm's own frame: pos_x slides the red band along the arm and the goal

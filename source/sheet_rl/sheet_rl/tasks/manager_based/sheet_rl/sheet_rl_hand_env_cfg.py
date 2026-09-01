@@ -14,7 +14,14 @@ and to score a policy; train on ``Template-Sheet-Rl-v0``.
 Nothing about the *observation* changes, which is what makes a checkpoint from the base task load
 and behave here. The policy sees joint state, nine sheet landmarks, the 7-dim goal command and its
 last action -- none of which reference the arm's shape. The arm reaches the policy only through the
-goal command, which is derived from the body's root pose.
+goal command, which is derived from the arm's *task frame*.
+
+That frame is the load-bearing detail, and it is deliberately not the body's root pose. Four of the
+command's seven dimensions are the frame's orientation and the other three are a point lifted off
+the arm along its +z, so anything that turns the body -- including a purely cosmetic re-mounting of
+the asset -- rewrites the observation wholesale and a base-task checkpoint stops making sense.
+``ARM_ROLL_QUAT`` below is declared to the command as ``arm_mount_quat`` for exactly that reason:
+the body carries the roll, the task frame does not.
 
 What is set below is the *geometry the reward terms assume*. They model the arm analytically rather
 than reading the collider, so the sculpt has to be described to them: a capsule running elbow to
@@ -36,9 +43,12 @@ from pathlib import Path
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils.configclass import configclass
 
 from isaaclab_newton.physics import NewtonCfg
+
+from .mdp import simulation_diverged
 
 from .sheet_rl_env_cfg import (
     TARGET_BAND_WIDTH,
@@ -73,15 +83,41 @@ metres with the scale baked into the geometry, so the spawner asks for no scale 
 219-metre hand.
 """
 
-ARM_REST_HEIGHT = 0.0655
+ARM_ROLL_QUAT = (0.0, 1.0, 0.0, 0.0)
+"""180 deg roll about the limb's own long axis, as ``(w, x, y, z)``.
+
++X is the axis running elbow -> wrist -> fingertips: the task frame is built with the forearm along
+it, ``elbowX_m = -0.211`` to ``fingertipX_m = +0.396``, and no other axis is even approximately
+aligned with the limb. Rotating about it is therefore a pure roll -- it turns the hand over without
+moving the arm off the spot -- and half a turn is ``(cos 90 deg, sin 90 deg, 0, 0) = (0, 1, 0, 0)``.
+The sculpt is authored palm-down, so this presents the palm and the inside of the forearm upwards.
+
+Declared to the goal command as ``arm_mount_quat`` below, which is what keeps this presentational.
+The command publishes the arm's orientation as four of its seven dimensions and lifts the goal off
+the arm along that frame's +z, so left undeclared this roll would hand the policy a quaternion it
+never met in training and drive the goal point through the limb to its underside -- and a
+checkpoint from the base task, which is the whole reason this environment exists, would come apart.
+"""
+
+ARM_REST_HEIGHT = 0.0560
 """Height of the arm's root above the table so the limb rests on it rather than sinking in [m].
 
 The mesh's lowest point sits this far below its own origin -- the origin is on the forearm axis, not
-on the skin. Taken from ``restHeight_m`` in the wrapper's ``customLayerData``, which the converter
-records from the composed bounding box.
+on the skin.
 
-The reset event masks the z component of its random offset to zero and applies yaw only, so this
-height and the limb's palm-down roll both survive every reset.
+This is the *rolled* figure, and it is not the ``restHeight_m`` of 0.0655 recorded in the wrapper's
+``customLayerData``: that one measures the composed bounding box as authored, palm-down. A limb is
+thicker through the palm than across the back of the hand -- the box runs -0.0655 to +0.0560 in z --
+so turning it over swaps which face is down and brings the root nearly a centimetre closer to the
+table. Left at 0.0655 the rolled arm would hover; taken from the box's *max* z it seats as before.
+
+This is the one thing the roll does change for the policy, and it is a 9.5 mm drop of the arm and
+the goal that rides on it -- the same kind of displacement the reset's own xy jitter already applies
+every episode, not the frame change that breaks a checkpoint. Pin it back to 0.0655 for a
+bit-identical observation, at the cost of an arm floating just clear of the table.
+
+The reset event masks the z component of its random offset to zero and composes its yaw onto the
+configured spawn orientation, so this height and the roll above both survive every reset.
 """
 
 ##
@@ -187,6 +223,29 @@ drops them, which shows up as cloth sinking through the arm rather than as an er
 headroom for evaluation rather than a measured figure -- if Newton reports overflow, raise it again.
 """
 
+TRIANGLE_PAIR_BUFFER = 8_000_000
+"""Triangle-pair buffer for the rigid-soft collision pipeline.
+
+The second buffer the capsule never needed, and the one :data:`PARTICLE_CONTACT_BUFFER` does not
+cover: that sizes the *solver's* contact list, this sizes the *narrow phase's* candidate list, and
+Newton defaults it to 1,000,000 for the whole scene rather than per environment. A capsule is an
+analytic shape with no triangles to pair against, so the default has never been approached before;
+with the sculpt and ``enable_rigid_soft_full_surface_contact`` it is exceeded roughly threefold at
+1024 environments -- a measured 2,960,190 -- and Newton reports the overflow as a warning, drops the
+excess pairs and carries on.
+
+That is the dangerous part. Dropping narrow-phase candidates does not raise; it lets cloth
+interpenetrate the arm and the VBD solver then resolves an impossible configuration, which diverges
+into NaN nodal positions on some environments. Because the observations expose only the nine
+landmark nodes while the rewards read all eighty-one, the first thing that notices is the reward,
+and training dies on rsl_rl's NaN check with nothing wrong in the reward code.
+
+Sized as ~7,800 per environment at 1024, against the ~2,900 measured, so the headroom survives a
+denser configuration than the one that happened to be sampled. It scales with environment count, so
+a larger batch may need it raised again; the symptom to watch for is the warning itself, which
+appears long before the NaN does.
+"""
+
 
 ##
 # Scene
@@ -204,7 +263,9 @@ class SheetArmMeshSceneCfg(SheetSceneCfg):
 
     mannequin_arm: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/MannequinArm",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, -0.15, ARM_REST_HEIGHT)),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.5, -0.15, ARM_REST_HEIGHT), rot=ARM_ROLL_QUAT
+        ),
         spawn=sim_utils.UsdFileCfg(
             usd_path=ARM_AND_HAND_USD_PATH,
             # static: kinematic and gravity-free, exactly as the capsule was. The arm must not fall
@@ -254,6 +315,29 @@ class SheetRlHandEnvCfg(SheetRlEnvCfg):
     def __post_init__(self) -> None:
         super().__post_init__()
 
+        # -- reset an environment the solver has lost.
+        #
+        # The mesh arm occasionally produces a state with no solution -- cloth at thousands of
+        # metres per second and NaN joint positions, on the step after a reset, in about one
+        # environment in a thousand. The inherited ``deformable_out_of_bounds`` cannot catch it:
+        # its test is a pair of comparisons, and every comparison against NaN is False, so a sheet
+        # that has gone NaN reads as inside the workspace. Without this the environment runs on in
+        # a state it can never recover from.
+        self.terminations.diverged = DoneTerm(func=simulation_diverged)
+
+        # -- there is no capsule here to resize.
+        #
+        # ``randomize_arm_radius`` writes a radius into Newton's ``shape_scale`` for the one shape
+        # of type ``CAPSULE`` under each ``MannequinArm`` body. This task replaces that capsule with
+        # the sculpted triangle mesh, at the same prim path, so the term finds nothing and raises
+        # during ``startup`` -- before the policy is ever loaded. Dropping it is the whole fix, and
+        # nothing is lost: a mesh has no radius to draw, and the thickness this task is *for* is the
+        # sculpt's own.
+        #
+        # Setting ``jitter`` to 0.0 does not do it. The term raises on the empty lookup before it
+        # reads the jitter at all, so the escape hatch is removing it, not zeroing it.
+        self.events.randomize_arm_radius = None
+
         # -- tell the reward terms what shape the arm is.
         #
         # They model it analytically from the body's root pose rather than reading the collider, so
@@ -268,6 +352,11 @@ class SheetRlHandEnvCfg(SheetRlEnvCfg):
         # -- the red band. Travel is left on the base task's own formula; only how the sleeve is
         # sized and where it is centred differ, for the reasons on the two constants above.
         command = self.commands.deformable_pose
+        # Tell the command the arm is mounted rolled, so it keeps working in the frame the arm would
+        # have had unrolled. This is what holds the 7-dim goal observation fixed under the roll --
+        # without it the published quaternion turns over with the body and the goal's lift points
+        # down into the table. Must match ``init_state.rot`` on the spawn above.
+        command.arm_mount_quat = ARM_ROLL_QUAT
         command.ranges.pos_x = (-ARM_BAND_TRAVEL, ARM_BAND_TRAVEL)
         command.band_visualizer_cfg.markers["band"].radius = BAND_MARKER_RADIUS
         command.band_visualizer_cfg.markers["band"].height = TARGET_BAND_WIDTH
@@ -288,3 +377,11 @@ class SheetRlHandEnvCfg(SheetRlEnvCfg):
                 solver = entry.solver_cfg
                 if hasattr(solver, "rigid_body_particle_contact_buffer_size"):
                     solver.rigid_body_particle_contact_buffer_size = PARTICLE_CONTACT_BUFFER
+            # The narrow phase's own buffer, which lives on the proxy mapping rather than on a
+            # solver entry and so is missed entirely by the loop above. Left at Newton's scene-wide
+            # default it overflows at large batch sizes, silently drops contacts, and surfaces as a
+            # NaN reward rather than as an error -- see ``TRIANGLE_PAIR_BUFFER``.
+            for proxy in getattr(value.solver_cfg, "proxies", []) or []:
+                pipeline = getattr(proxy, "collision_pipeline", None)
+                if pipeline is not None and hasattr(pipeline, "max_triangle_pairs"):
+                    pipeline.max_triangle_pairs = TRIANGLE_PAIR_BUFFER

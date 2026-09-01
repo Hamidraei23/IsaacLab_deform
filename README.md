@@ -1,7 +1,11 @@
 # Sheet RL — pulling a deformable sheet out of a slot
 
 <p align="center">
-  <img src="media/hand_placement.gif" alt="Franka Panda pulling a cloth sheet out of a slot" width="100%">
+  <img src="media/hand_placement.gif" alt="Franka Panda draping a cloth sheet over the mannequin arm, palm down" width="49%">
+  <img src="media/Second_arm.gif" alt="The same task with the mannequin arm rolled palm up" width="49%">
+</p>
+<p align="center">
+  <sub>Left: the sculpted arm as authored, palm down. Right: the same task with the arm rolled palm up &mdash; a mounting rotation the goal command is told about, so the policy's observation is unchanged.</sub>
 </p>
 
 A Franka Panda learns to pinch the free edge of a cloth sheet standing upright in a narrow slot and

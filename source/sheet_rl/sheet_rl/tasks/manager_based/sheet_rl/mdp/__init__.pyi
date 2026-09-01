@@ -11,6 +11,7 @@ __all__ = [
     "grasp_stage_reward",
     "gripper_recommit_penalty",
     "release_stage_reward",
+    "release_retreat_progress",
     "band_approach_progress",
     "drape_milestones",
     "drape_failure_penalty",
@@ -21,6 +22,7 @@ __all__ = [
     "closed_over_finished_drape",
     "drape_complete",
     "sheet_dropped_on_table",
+    "simulation_diverged",
     "sheet_key_points",
     "released_before_extraction",
     "released_too_high",
@@ -36,13 +38,14 @@ __all__ = [
     "ArmDrapePoseCommand",
     "ArmDrapePoseCommandCfg",
     "reset_arm_and_sheet",
+    "randomize_arm_radius",
 ]
 
 # Forward stable MDP terms lazily, then override with environment-specific terms below.
 from isaaclab.envs.mdp import *  # noqa: F401, F403
 
 from .commands import ArmDrapePoseCommand, ArmDrapePoseCommandCfg
-from .events import reset_arm_and_sheet
+from .events import randomize_arm_radius, reset_arm_and_sheet
 from .observations import sheet_key_points
 from .terminations import (
     drape_complete,
@@ -50,6 +53,7 @@ from .terminations import (
     released_before_extraction,
     released_too_high,
     sheet_dropped_on_table,
+    simulation_diverged,
 )
 from .rewards import (
     band_approach_progress,
@@ -68,6 +72,7 @@ from .rewards import (
     goal_com_proximity,
     gripper_recommit_penalty,
     joint_pos_target_l2,
+    release_retreat_progress,
     release_stage_reward,
     sheet_extracted,
     sheet_lift_progress,

@@ -76,14 +76,14 @@ def sheet_dropped_on_table(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 
 def drape_complete(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """End the episode once the sheet has sat on the red band, covered, for a full second.
+    """End the episode once the sheet has sat on the red band, covered, for two full seconds.
 
     The task's only success condition, and the one termination here that is not a failure. The
     cloth is off the gripper and on the arm and has stayed there; there is nothing further the
     policy can do that the task asks for, so the remaining steps are better spent on a fresh
     episode.
 
-    The second of settling is the substance of the test, not a formality. Coverage crossing the
+    The settling window is the substance of the test, not a formality. Coverage crossing the
     success threshold is direction-blind -- a sheet sliding off the arm passes the bar going down
     just as one settling onto it passes going up -- so ending the episode on the crossing would
     score the two alike and hand out the bonus before the physics had said which had happened.
@@ -147,3 +147,49 @@ def finger_in_slot(
         local = quat_apply_inverse(quat, offset)
         inside |= (local.abs() < limits).all(dim=-1)
     return inside
+
+
+def simulation_diverged(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Whether the simulation has produced a non-finite state for this environment.
+
+    The failure the inherited ``deformable_out_of_bounds`` cannot see. That term asks whether any
+    node has left a box, as ``(pos < lower) | (pos > upper)`` -- and every comparison against NaN is
+    ``False``, so a sheet whose coordinates have gone NaN reads as comfortably *inside* the
+    workspace and is never terminated. The one state most in need of a reset is the one state it
+    cannot detect.
+
+    What that costs is out of proportion to how rare it is. The environment goes on running with a
+    NaN sheet; every reward that carries a distance into its payout returns NaN, the batch is
+    poisoned, and rsl_rl's ``check_nan`` ends the whole run. A single environment in a thousand
+    takes down a job that was going to run for three thousand iterations.
+
+    Both assets are tested because divergence takes the pair together: a blown-up cloth drags the
+    gripper holding it, and an exploded articulation flings the cloth. Whichever went first, the
+    environment is unrecoverable and the only useful response is to reset it.
+
+    Note:
+        Terminations are computed *before* rewards, so this fires on the same step the state goes
+        bad -- but the rewards for that step are still computed from it. The environment class the
+        hand task registers replaces those non-finite rewards with zero, which is what keeps the
+        step from reaching the learner. This term is what stops the environment running on in a
+        state it can never recover from; the two are needed together.
+
+    Args:
+        env: The environment.
+        asset_cfg: The deformable sheet.
+        robot_cfg: The robot.
+
+    Returns:
+        Boolean tensor with shape ``(num_envs,)``.
+    """
+    sheet = env.scene[asset_cfg.name]
+    robot: Articulation = env.scene[robot_cfg.name]
+
+    bad = ~torch.isfinite(sheet.data.nodal_pos_w.torch).flatten(1).all(dim=1)
+    bad |= ~torch.isfinite(robot.data.joint_pos).flatten(1).all(dim=1)
+    bad |= ~torch.isfinite(robot.data.joint_vel).flatten(1).all(dim=1)
+    return bad
