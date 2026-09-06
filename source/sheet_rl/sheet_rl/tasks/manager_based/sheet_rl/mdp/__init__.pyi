@@ -4,6 +4,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 __all__ = [
+    "SquashedRelativeJointPositionAction",
+    "SquashedRelativeJointPositionActionCfg",
+    "applied_actions",
     "joint_pos_target_l2",
     "band_coverage",
     "band_center_distance",
@@ -14,6 +17,10 @@ __all__ = [
     "release_retreat_progress",
     "band_approach_progress",
     "drape_milestones",
+    "extraction_bonus",
+    "phase_one_finished",
+    "drape_symmetry_payout",
+    "drape_corner_heights",
     "drape_failure_penalty",
     "table_drop_penalty",
     "gripper_closed_near_band",
@@ -29,7 +36,7 @@ __all__ = [
     "finger_in_slot",
     "sheet_lift_progress",
     "squareness_progress",
-    "top_edge_distance",
+    "top_edge_progress",
     "ee_speed_penalty",
     "ee_table_clearance",
     "grasp_alignment",
@@ -46,10 +53,12 @@ from isaaclab.envs.mdp import *  # noqa: F401, F403
 
 from .commands import ArmDrapePoseCommand, ArmDrapePoseCommandCfg
 from .events import randomize_arm_radius, reset_arm_and_sheet
-from .observations import sheet_key_points
+from .actions import SquashedRelativeJointPositionAction, SquashedRelativeJointPositionActionCfg
+from .observations import applied_actions, sheet_key_points
 from .terminations import (
     drape_complete,
     finger_in_slot,
+    phase_one_finished,
     released_before_extraction,
     released_too_high,
     sheet_dropped_on_table,
@@ -60,6 +69,9 @@ from .rewards import (
     band_center_distance,
     drape_failure_penalty,
     drape_milestones,
+    extraction_bonus,
+    drape_corner_heights,
+    drape_symmetry_payout,
     gripper_closed_near_band,
     band_coverage,
     closed_over_finished_drape,
@@ -79,5 +91,5 @@ from .rewards import (
     squareness_progress,
     table_drop_penalty,
     timeout_still_gripping,
-    top_edge_distance,
+    top_edge_progress,
 )

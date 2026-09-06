@@ -75,3 +75,23 @@ def sheet_key_points(
         root_pos_w.reshape(-1, 3), root_quat_w.reshape(-1, 4), points_w.reshape(-1, 3)
     )
     return points_b.view(env.num_envs, -1)
+
+
+def applied_actions(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """The action the terms actually applied last step, not the one the policy asked for.
+
+    Every action term's ``raw_actions`` concatenated in manager order, so this is a drop-in for
+    ``last_action`` with the same width and channel order.
+
+    The difference is the arm slice. :class:`~..actions.SquashedRelativeJointPositionAction`
+    measures each increment against its own previous *applied* action and publishes that as
+    ``raw_actions``, so it is the reference point the next action is relative to. ``last_action``
+    reports the manager's buffer, which holds the request; the two differ by exactly the amount the
+    squash removed, and feeding the request leaves the policy unable to see where its next increment
+    starts from.
+
+    Args:
+        env: The environment.
+    """
+    manager = env.action_manager
+    return torch.cat([manager.get_term(name).raw_actions for name in manager.active_terms], dim=-1)

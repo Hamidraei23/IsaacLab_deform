@@ -50,6 +50,10 @@ from isaaclab_newton.physics import NewtonCfg
 
 from .mdp import simulation_diverged
 
+from .sheet_edge_marker import SheetEdgeMarkerCfg
+
+from .sheet_push import SheetPushCfg
+
 from .sheet_rl_env_cfg import (
     TARGET_BAND_WIDTH,
     SheetRlEnvCfg,
@@ -311,6 +315,17 @@ class SheetRlHandEnvCfg(SheetRlEnvCfg):
     """The sheet task with a sculpted, mesh-collided arm and hand. Evaluation only."""
 
     scene: SheetArmMeshScenePresetCfg = SheetArmMeshScenePresetCfg()
+
+    # A red dot on the middle of the sheet's lower edge, identified at reset and held for the rest
+    # of the episode. Declared here because this is the environment that gets watched, and drawn
+    # rather than simulated -- it has no collider and nothing in the MDP reads it, so a checkpoint is
+    # unaffected. Switch it off with ``env.edge_marker.enabled=false``.
+    edge_marker: SheetEdgeMarkerCfg = SheetEdgeMarkerCfg()
+
+    # Press X in the viewer and that dot is pushed at 10 N for 1.5 s, sideways and up. A real force
+    # in the solver rather than a written velocity, and equally invisible to the MDP -- see
+    # ``sheet_push``. Tunable from the command line, e.g. ``env.push.force=4.0``.
+    push: SheetPushCfg = SheetPushCfg()
 
     def __post_init__(self) -> None:
         super().__post_init__()

@@ -35,11 +35,67 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
 _PHASE_ATTR = "_sheet_placement_phase"
 _COVERAGE_ATTR = "_sheet_band_coverage"
 _HOLDING_ATTR = "_sheet_holding"
+_GRASPED_ATTR = "_sheet_first_grasp"
 _EARLY_RELEASE_ATTR = "_sheet_early_release"
 _HIGH_RELEASE_ATTR = "_sheet_high_release"
 _DRAPE_SUCCESS_ATTR = "_sheet_drape_success"
 _TABLE_DROP_ATTR = "_sheet_table_drop"
 _DEBUG_ATTR = "_sheet_debug"
+_ALIGNMENT_ATTR = "_sheet_grasp_alignment"
+_SYMMETRY_PAYOUT_ATTR = "_sheet_drape_symmetry_payout"
+_CORNER_HEIGHT_ATTR = "_sheet_drape_corner_heights"
+
+
+def drape_corner_heights(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Height of each of the sheet's four corners above the table [m]. Shape ``(num_envs, 4)``.
+
+    The quantity behind the symmetry bonus, republished per step. :class:`drape_milestones` scores
+    the *highest* of these four -- full bonus when it is on the table, nothing once it is
+    ``symmetry_span`` above it -- so a symmetry payout that came in under its maximum is explained by
+    whichever corner was still up, and by how far.
+
+    Diagnostic only: nothing in the environment reads it, and it is measured every step rather than
+    only on the step the drape completes, so the whole approach and settle can be seen rather than
+    just the instant that scored.
+
+    Corners are in the sheet's node-grid order -- ``(0, 0)``, ``(0, last)``, ``(last, 0)``,
+    ``(last, last)`` -- and are the same four nodes the bonus is computed from, which is the reason
+    for publishing them here rather than recomputing them outside.
+    """
+    state = getattr(env, _CORNER_HEIGHT_ATTR, None)
+    if state is None:
+        state = torch.zeros(env.num_envs, 4, device=env.device)
+        setattr(env, _CORNER_HEIGHT_ATTR, state)
+    return state
+
+
+def drape_symmetry_payout(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Everything evenness did to the drape term this step, in the term's per-second units.
+
+    :class:`drape_milestones` bundles its payouts into one reward term, so the reward manager
+    records their sum in a single column and the part that turns on how squarely the sheet fell --
+    the largest part, and the one worth watching -- cannot be told apart from the milestones it
+    rides with. This republishes it on its own, as two contributions added together:
+
+    * the symmetry bonus itself, a one-shot paid on the step the drape completes;
+    * what the symmetry multiplier added to, or took off, the milestones on this step.
+
+    So the nominal milestones plus this value is exactly what the term paid. The second contribution
+    is negative whenever the drape is lying badly enough to scale below one, which is the honest
+    reading: an uneven drape does not merely miss a bonus, it gives up part of what it had earned.
+
+    Diagnostic only, in the sense that nothing in the environment reads it: no observation, reward
+    or termination consults this, and the value is already inside the term's return. It exists so
+    ``scripts/eval_joint_speed.py`` can split the plotted ``drape_stage`` column into the milestones
+    at face value and the symmetry effect, which together still sum to what the term paid.
+
+    Overwritten in place on every call, so it always describes the current step.
+    """
+    state = getattr(env, _SYMMETRY_PAYOUT_ATTR, None)
+    if state is None:
+        state = torch.zeros(env.num_envs, device=env.device)
+        setattr(env, _SYMMETRY_PAYOUT_ATTR, state)
+    return state
 
 
 def grasp_debug(env: ManagerBasedRLEnv) -> dict[str, torch.Tensor]:
@@ -131,6 +187,27 @@ def _is_holding(env: ManagerBasedRLEnv) -> torch.Tensor:
     return state
 
 
+def _first_grasp(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Per-environment latch: has the gripper taken a scored hold of the sheet this episode?
+
+    Owned by :class:`grasp_stage_reward`, which is the term that tracks the grasp state machine, and
+    republished here so the approach shaping can stop paying the moment the pick succeeds without
+    duplicating the capture test. Latched rather than momentary: a grasp that is later lost does not
+    make the sheet un-approached, and re-paying the approach after a slip would let a policy farm it
+    by dropping and re-taking the sheet.
+
+    Set earlier in the episode than :func:`_phase_reached` -- the sheet is held before it is clear of
+    the slot -- which is the point: once the edge is in the gripper the approach is over, and waiting
+    for extraction leaves the term paying through the whole lift. Created lazily so read order does
+    not matter.
+    """
+    state = getattr(env, _GRASPED_ATTR, None)
+    if state is None:
+        state = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        setattr(env, _GRASPED_ATTR, state)
+    return state
+
+
 def _phase_reached(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Per-environment latch: has the sheet been pulled clear of the slot this episode?
 
@@ -164,9 +241,28 @@ def _last_coverage(env: ManagerBasedRLEnv) -> torch.Tensor:
     return state
 
 
-def _closing_squareness(
-    robot: Articulation, slot: RigidObject, left_id: int, right_id: int
+def _last_alignment(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Alignment value published by :func:`grasp_alignment` earlier in this reward step.
+
+    This is the raw value before the reward manager applies the term's external weight and
+    ``step_dt``. The alignment term is declared before both extraction and lift progress, so those
+    terms always read the current pose rather than the previous step's pose.
+    """
+    state = getattr(env, _ALIGNMENT_ATTR, None)
+    if state is None:
+        state = torch.zeros(env.num_envs, device=env.device)
+        setattr(env, _ALIGNMENT_ATTR, state)
+    return state
+
+
+def _alignment_multiplier(
+    env: ManagerBasedRLEnv, alignment_max_reward: float, alignment_offset: float
 ) -> torch.Tensor:
+    """Return ``(alignment + offset) / max_reward`` for downstream phase-one rewards."""
+    return (_last_alignment(env) + alignment_offset) / alignment_max_reward
+
+
+def _closing_squareness(robot: Articulation, slot: RigidObject, hand_id: int) -> torch.Tensor:
     """How square the fingers' closing axis is to the slot, in [0, 1].
 
     One when the axis lies across the gap -- one pad ending up on each face of the sheet, so they
@@ -178,13 +274,56 @@ def _closing_squareness(
     Defined once and shared by everything that reads it. It used to be written out separately in
     the alignment shaping and in the grasp term's diagnostics, which meant the quantity being
     rewarded and the number logged to judge it could drift apart without anyone noticing.
+
+    The Panda fingers translate along the hand's local +/-Y axes. Reading that axis from the hand
+    orientation keeps it well defined at every gripper width; subtracting the two finger-link
+    origins degenerates to a zero vector when a fully closed gripper brings those origins together.
     """
     unit_y = torch.tensor([0.0, 1.0, 0.0], device=robot.device).expand(robot.num_instances, 3)
     lateral = quat_apply(slot.data.root_quat_w.torch, unit_y)
-    bodies = robot.data.body_link_pose_w.torch
-    closing = bodies[:, right_id, :3] - bodies[:, left_id, :3]
-    closing = closing / closing.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    hand_quat = robot.data.body_link_pose_w.torch[:, hand_id, 3:7]
+    closing = quat_apply(hand_quat, unit_y)
     return (closing * lateral).sum(-1).abs()
+
+
+def _top_edge_surface_normal(nodes: torch.Tensor, resolution: tuple[int, int]) -> torch.Tensor:
+    """Local sheet normal at the centre of the currently highest border.
+
+    The normal is built from a tangent along the border and the direction to the adjacent row of
+    nodes. Only a small central patch is used, so a bend elsewhere in the deformable sheet does not
+    rotate the grasp target away from the surface the fingertips are about to contact.
+
+    The returned direction has arbitrary sign. Gripper alignment uses its absolute dot product,
+    because approaching either face of the sheet is equivalent for a symmetric two-finger pinch.
+    """
+    cols, rows = resolution[0] + 1, resolution[1] + 1
+    grid = torch.arange(rows * cols, device=nodes.device).view(rows, cols)
+    borders = (grid[0, :], grid[-1, :], grid[:, 0], grid[:, -1])
+    neighbours = (grid[1, :], grid[-2, :], grid[:, 1], grid[:, -2])
+
+    border_heights = torch.stack([nodes[:, ids, 2].mean(dim=1) for ids in borders], dim=1)
+    best = border_heights.argmax(dim=1)
+
+    tangents = []
+    inwards = []
+    for edge_ids, inner_ids in zip(borders, neighbours, strict=True):
+        mid = len(edge_ids) // 2
+        lo = max(0, mid - 1)
+        hi = min(len(edge_ids), mid + 2)
+        edge_patch = nodes[:, edge_ids[lo:hi], :]
+        inner_patch = nodes[:, inner_ids[lo:hi], :]
+        tangents.append(edge_patch[:, -1] - edge_patch[:, 0])
+        inwards.append(inner_patch.mean(dim=1) - edge_patch.mean(dim=1))
+
+    env_ids = torch.arange(len(nodes), device=nodes.device)
+    tangent = torch.stack(tangents, dim=1)[env_ids, best]
+    inward = torch.stack(inwards, dim=1)[env_ids, best]
+    tangent = tangent / tangent.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    # Remove any along-edge component before taking the cross product. This makes the estimate
+    # insensitive to shear of the first row while retaining its out-of-plane bend.
+    inward = inward - (inward * tangent).sum(dim=-1, keepdim=True) * tangent
+    normal = torch.cross(tangent, inward, dim=-1)
+    return normal / normal.norm(dim=-1, keepdim=True).clamp_min(1e-6)
 
 
 def _arm_radius(
@@ -484,31 +623,56 @@ def _grasp_site(
     return pose[:, :3] + quat_apply(pose[:, 3:7], offset), pose[:, 3:7]
 
 
-def top_edge_distance(
-    env: ManagerBasedRLEnv,
-    resolution: tuple[int, int],
-    coarse_std: float = 0.4,
-    fine_std: float = 0.05,
-    phase_one_only: bool = True,
-    hand_body_name: str = "panda_hand",
-    grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.1034),
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Shaped reward for bringing the fingertips to the middle of the sheet's top edge.
+class top_edge_progress(ManagerTermBase):
+    """Ratcheted approach reward: pays only for closeness to the sheet's top edge never yet reached.
 
-    The target is the one place the sheet may be taken from, so this is the whole approach: it
-    pulls the gripper across the table and down onto the strip standing above the slot walls.
+    The target is the one place the sheet may be taken from, so this is the whole approach: it pulls
+    the gripper across the table and down onto the strip standing above the slot walls. Aimed at the
+    *centre* of that edge rather than the nearest point on it, because a grasp near a corner peels
+    the sheet sideways out of the slot instead of drawing it straight up.
 
-    Aimed at the *centre* of that edge rather than the nearest point on it, because a grasp near a
-    corner peels the sheet sideways out of the slot instead of drawing it straight up.
+    **Progress, not level.** A reward for *being* near the edge pays the same on the five-hundredth
+    step as on the first, which makes hovering over the slot an annuity -- and one the policy can
+    collect without ever closing the gripper, since closing risks losing the position that is paying.
+    This pays for *arriving* instead. The episode keeps a high-water mark of the closeness below, and
+    each step is paid only the amount by which the current value exceeds it. Three consequences, and
+    they are the whole point:
 
-    Two ``tanh`` scales are averaged rather than one, because a single scale cannot do both jobs.
-    ``tanh`` saturates hard: at the half-metre the gripper starts from, a 0.1 m scale has a slope of
-    about 0.002 per metre, so closing a centimetre earns ~1e-5 and the signal is buried under the
-    policy's own action noise -- a run with exactly that setup sat 0.5 m from the sheet for 78
-    iterations without ever approaching. The coarse scale carries the gripper across the workspace,
-    the fine one positions it once it arrives.
+    * **Holding still pays nothing.** The mark already sits at the current value.
+    * **Backing off and returning pays nothing.** Retreating does not lower the mark, so ground
+      reclaimed on the way back has been paid for once already.
+    * **The episode total is bounded** by ``max_reward * (best_closeness - closeness_at_reset)``,
+      however long the episode runs and however many times the gripper crosses the table.
+
+    Same construction as :class:`band_approach_progress`, which does this for phase two.
+
+    **Closeness is two exponential scales averaged**, because a single scale cannot do both jobs. A
+    narrow scale is numerically dead at range: at the half-metre the gripper starts from, a 0.1 m
+    scale has a slope of about 0.002 per metre, so closing a centimetre earns ~1e-5 and the signal is
+    buried under the policy's own action noise -- a run with exactly that setup sat 0.5 m from the
+    sheet for 78 iterations without ever approaching. The coarse scale carries the gripper across the
+    workspace, the fine one positions it once it arrives.
+
+    The kernel is ``exp(-d / std)`` rather than ``1 - tanh(d / std)``. Both peak at 1 on contact and
+    agree to within a few percent around half a metre; the difference is the far tail, where the term
+    has to do its work. At 1 m the exponential pulls three times harder and at 2 m some thirty-six
+    times harder, tanh being saturated to numerical silence out there.
+
+    Note:
+        Stops paying at the first scored grasp rather than at extraction. Once the edge is in the
+        gripper the approach is over; waiting for the sheet to clear the slot would leave the term
+        live through the whole lift, where the sheet moves *with* the gripper and closeness is pinned
+        near one. In practice the ratchet has already been exhausted by then, so the gate is a
+        statement of intent more than a change in payout.
+
+    Note:
+        The gate reads a latch :class:`grasp_stage_reward` sets, and this term is declared before it,
+        so on the single step the grasp first lands the gate is one step stale. Harmless: the mark is
+        at its maximum by then and the gain is zero anyway.
+
+    Note:
+        Divided by ``step_dt``, so :paramref:`max_reward` is the literal payout for a full approach
+        rather than a per-step rate.
 
     Args:
         env: The environment.
@@ -516,24 +680,65 @@ def top_edge_distance(
         coarse_std: Distance scale of the travel term [m]. Should be comparable to how far the
             gripper starts from the sheet, or it saturates before it can pull.
         fine_std: Distance scale of the placement term [m]. Comparable to the grasp radius.
-        phase_one_only: Stop paying once the sheet is clear of the slot. The gripper is holding the
-            top edge by then, so the term would otherwise pay a near-constant ~1 per step for the
-            whole of phase two -- a flat offset that buys nothing and dilutes the drape shaping.
+        max_reward: Payout for closing the whole way in, from nothing to touching [reward]. The
+            episode collects this times the closeness actually gained, so an approach that starts at
+            0.18 and finishes at 1.0 earns 82% of it.
+        until_grasp: Stop paying once the gripper has a scored hold of the sheet.
         hand_body_name: Body the grasp frame hangs off.
         grasp_offset: Grasp frame offset in the hand's frame [m].
         asset_cfg: The deformable sheet.
         robot_cfg: The robot.
     """
-    sheet: DeformableObject = env.scene[asset_cfg.name]
-    tip, _ = _grasp_site(env, robot_cfg, hand_body_name, grasp_offset)
-    center = _top_edge_nodes(sheet.data.nodal_pos_w.torch, resolution).mean(dim=1)
-    distance = (tip - center).norm(dim=-1)
-    reward = 0.5 * (1.0 - torch.tanh(distance / coarse_std)) + 0.5 * (
-        1.0 - torch.tanh(distance / fine_std)
-    )
-    if phase_one_only:
-        reward = reward * (~_phase_reached(env)).float()
-    return reward
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._sheet: DeformableObject = env.scene[cfg.params["asset_cfg"].name]
+        self._best = torch.zeros(env.num_envs, device=env.device)
+        self._start = torch.zeros(env.num_envs, device=env.device)
+        # nothing to measure against until the first step of the episode has been seen
+        self._fresh = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        extras = self._env.extras.setdefault("log", {})
+        # how much of the approach budget the episode actually collected, as a fraction of one.
+        # Says directly whether the gripper is reaching the edge or stalling part-way across.
+        extras["Events/top_edge_earned"] = (self._best[env_ids] - self._start[env_ids]).mean()
+        self._best[env_ids] = 0.0
+        self._start[env_ids] = 0.0
+        self._fresh[env_ids] = True
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        resolution: tuple[int, int],
+        coarse_std: float = 0.4,
+        fine_std: float = 0.05,
+        max_reward: float = 1000.0,
+        until_grasp: bool = True,
+        hand_body_name: str = "panda_hand",
+        grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.1034),
+        asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
+        robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ) -> torch.Tensor:
+        tip, _ = _grasp_site(env, robot_cfg, hand_body_name, grasp_offset)
+        center = _top_edge_nodes(self._sheet.data.nodal_pos_w.torch, resolution).mean(dim=1)
+        distance = (tip - center).norm(dim=-1)
+        closeness = 0.5 * torch.exp(-distance / coarse_std) + 0.5 * torch.exp(-distance / fine_std)
+
+        # the first step of the episode sets the mark rather than being paid against it, so the
+        # gripper is not paid for wherever the reset happened to leave it
+        self._best = torch.where(self._fresh, closeness, self._best)
+        self._start = torch.where(self._fresh, closeness, self._start)
+        self._fresh = torch.zeros_like(self._fresh)
+
+        gain = (closeness - self._best).clamp(min=0.0)
+        self._best = torch.maximum(self._best, closeness)
+        if until_grasp:
+            gain = gain * (~_first_grasp(env)).float()
+
+        return gain * max_reward / env.step_dt
 
 
 def ee_table_clearance(
@@ -579,7 +784,7 @@ def ee_speed_penalty(
 
     Measured in Cartesian space rather than on the joints, and that choice matters here: a
     joint-space charge bills every wrist rotation at the same rate as useful travel, which puts it
-    in direct opposition to ``square_progress``, a term paid *for* turning the wrist. Hand speed is
+    in direct opposition to the alignment term paid for turning the wrist. Hand speed is
     indifferent to how the arm arrives at a pose, so the two do not fight.
 
     Taken at the hand link rather than at the grasp frame for the same reason. The fingertips sweep
@@ -622,23 +827,24 @@ def grasp_alignment(
     resolution: tuple[int, int],
     std: float = 0.1,
     downward_frac: float = 0.5,
+    max_reward: float = 50.0,
+    reference_error_deg: float = 20.0,
+    reward_at_reference: float = 5.0,
     phase_one_only: bool = True,
     hand_body_name: str = "panda_hand",
-    left_finger_body_name: str = "panda_leftfinger",
-    right_finger_body_name: str = "panda_rightfinger",
     grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.1034),
     asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     slot_cfg: SceneEntityCfg = SceneEntityCfg("slot_neg_y"),
 ) -> torch.Tensor:
-    """Shaped reward for holding the hand in the one posture that can take the top edge.
+    """Exponential reward for aligning the finger pads with the sheet's top-edge surface.
 
     Two things are asked for at once, averaged:
 
     * **pointing down** -- the hand's approach axis faces the table, so the fingers hang below the
       wrist and can be lowered onto the edge from directly above.
-    * **square to the slot** -- the fingers' closing axis lies across the gap, so one pad ends up on
-      each face of the sheet and they close through its thickness.
+    * **parallel pads** -- the fingers' closing axis follows the local sheet normal, so one pad ends
+      up on each face and the pads close through the sheet's thickness.
 
     Scaled by how close the fingertips are to the edge, so striking the pose on the far side of the
     table is worth little. The scale is deliberately loose: gated tightly the term is numerically
@@ -646,6 +852,11 @@ def grasp_alignment(
     and the policy arrives with its wrist in an arbitrary posture having never been paid to turn it.
     Pointing the hand down is easy to learn and useful the whole way in, so it is better rewarded
     early and weakly than late and sharply.
+
+    The pad-alignment component is an exponential of angular error, calibrated to return
+    :paramref:`max_reward` at zero error and :paramref:`reward_at_reference` at
+    :paramref:`reference_error_deg`. It uses ``1 - cos(theta)`` as the smooth rotation error, so it
+    has no quaternion-sign discontinuity and decays sharply outside the requested tolerance.
 
     :paramref:`downward_frac` splits the term between the two. It used to be a hardcoded even
     split, which is wasteful once one of the two is solved: with the hand already pointing down on
@@ -657,25 +868,26 @@ def grasp_alignment(
         resolution: The sheet mesh's ``(x, y)`` element counts.
         std: Distance scale of the proximity gate [m].
         downward_frac: Share of the term given to pointing down, in [0, 1]. The remainder goes to
-            being square to the slot. At 0 the term pays for squareness alone.
+            aligning the pads to the sheet. At 0 the term pays for pad alignment alone.
+        max_reward: Alignment value at zero angular error, before proximity and phase gates.
+        reference_error_deg: Angular error at which the exponential reaches
+            :paramref:`reward_at_reference` [deg].
+        reward_at_reference: Alignment value at :paramref:`reference_error_deg`, before gates.
         phase_one_only: Stop paying once the sheet is clear of the slot. Not optional in practice:
-            the posture this term asks for is defined against the *slot*, and phase two needs the
-            wrist free to turn wherever the drape requires. Left on, it pays the policy to carry
-            the sheet to the arm still holding its grasping pose.
+            phase two needs the wrist free to turn wherever the drape requires. Left on, it pays
+            the policy to carry the sheet to the arm still holding its grasping pose.
         hand_body_name: Body the grasp frame hangs off.
-        left_finger_body_name: Left fingertip body.
-        right_finger_body_name: Right fingertip body.
         grasp_offset: Grasp frame offset in the hand's frame [m].
         asset_cfg: The deformable sheet.
         robot_cfg: The robot.
-        slot_cfg: The slot wall whose lateral axis defines "square".
+        slot_cfg: Slot wall whose normal is used only if the local cloth patch is degenerate.
     """
     sheet: DeformableObject = env.scene[asset_cfg.name]
-    robot: Articulation = env.scene[robot_cfg.name]
     slot: RigidObject = env.scene[slot_cfg.name]
 
     tip, hand_quat = _grasp_site(env, robot_cfg, hand_body_name, grasp_offset)
-    center = _top_edge_nodes(sheet.data.nodal_pos_w.torch, resolution).mean(dim=1)
+    nodes = sheet.data.nodal_pos_w.torch
+    center = _top_edge_nodes(nodes, resolution).mean(dim=1)
     proximity = 1.0 - torch.tanh((tip - center).norm(dim=-1) / std)
 
     unit_z = torch.tensor([0.0, 0.0, 1.0], device=tip.device).expand(len(tip), 3)
@@ -684,97 +896,26 @@ def grasp_alignment(
     approach_z = quat_apply(hand_quat, unit_z)[:, 2]
     downward = 0.5 * (1.0 - approach_z)
 
-    square = _closing_squareness(
-        robot,
-        slot,
-        robot.body_names.index(left_finger_body_name),
-        robot.body_names.index(right_finger_body_name),
-    )
+    unit_y = torch.tensor([0.0, 1.0, 0.0], device=tip.device).expand(len(tip), 3)
+    closing = quat_apply(hand_quat, unit_y)
+    sheet_normal = _top_edge_surface_normal(nodes, resolution)
+    normal_valid = sheet_normal.norm(dim=-1, keepdim=True) > 0.5
+    slot_normal = quat_apply(slot.data.root_quat_w.torch, unit_y)
+    sheet_normal = torch.where(normal_valid, sheet_normal, slot_normal)
+    cosine = (closing * sheet_normal).sum(dim=-1).abs().clamp(max=1.0)
 
-    reward = proximity * (downward_frac * downward + (1.0 - downward_frac) * square)
+    reference_cosine = math.cos(math.radians(reference_error_deg))
+    decay = math.log(max_reward / reward_at_reference) / max(1.0 - reference_cosine, 1e-6)
+    pad_alignment = max_reward * torch.exp(-decay * (1.0 - cosine))
+    downward_reward = max_reward * downward
+
+    reward = proximity * (
+        downward_frac * downward_reward + (1.0 - downward_frac) * pad_alignment
+    )
     if phase_one_only:
         reward = reward * (~_phase_reached(env)).float()
+    _last_alignment(env).copy_(reward)
     return reward
-
-
-class squareness_progress(ManagerTermBase):
-    """Potential-based shaping that pays for *turning* the wrist square to the slot.
-
-    Pays the change in squareness rather than its level, so the reward arrives on the step the
-    wrist actually turns instead of forty steps later folded into an extraction bonus. Credit
-    assignment is the entire point of the term. Squareness already influences the return -- a
-    crooked grasp is a worse grasp -- but only through a payout at the end of a long episode,
-    which has to be propagated back through a critic simultaneously fitting returns that span
-    three orders of magnitude. The gradient that reaches joint 7 by that route is negligible.
-
-    Since the increments telescope, an episode collects ``max_reward * (square_end -
-    square_start)`` regardless of the route the wrist took, so there is nothing to farm: turning
-    square and then back again nets exactly zero. That is what separates this from scaling some
-    other term *by* squareness, which is path-dependent and pays for the same turn over and over
-    -- a version of this that multiplied the lift shaping's delta could be cycled for +450 per
-    bob, while this one nets 0 by construction.
-
-    Deliberately ungated. The lift shaping has to require a grasp because it pays for the sheet
-    rising by any means, and batting it up is easier to find than lifting it; this pays for an
-    orientation the gripper is free to correct at any moment, and a gate would only introduce an
-    edge for the potential to jump across.
-
-    The first step of an episode pays nothing. There is no previous value to difference against,
-    and treating the reset value as one would hand out up to ``max_reward`` of reward decided
-    entirely by the reset draw -- noise the policy cannot act on, straight into the critic.
-
-    Args:
-        env: The environment.
-        max_reward: Total paid for going from fully skew to fully square [reward]. Signed: losing
-            the alignment again refunds it.
-        phase_one_only: Stop paying once the sheet is clear of the slot. "Square to the slot" is
-            meaningless for the drape, and the wrist has to turn a long way to lay the sheet down.
-        left_finger_body_name: Left fingertip body.
-        right_finger_body_name: Right fingertip body.
-        robot_cfg: The robot.
-        slot_cfg: The slot wall whose lateral axis defines "square".
-    """
-
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
-        super().__init__(cfg, env)
-        params = cfg.params
-        self._robot: Articulation = env.scene[params["robot_cfg"].name]
-        self._slot: RigidObject = env.scene[params["slot_cfg"].name]
-        names = self._robot.body_names
-        self._left_id = names.index(params.get("left_finger_body_name", "panda_leftfinger"))
-        self._right_id = names.index(params.get("right_finger_body_name", "panda_rightfinger"))
-        self._prev = torch.zeros(env.num_envs, device=env.device)
-        # nothing to difference against on the first step of an episode
-        self._fresh = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
-
-    def reset(self, env_ids: Sequence[int] | None = None) -> None:
-        if env_ids is None:
-            env_ids = slice(None)
-        self._fresh[env_ids] = True
-
-    def __call__(
-        self,
-        env: ManagerBasedRLEnv,
-        robot_cfg: SceneEntityCfg,
-        slot_cfg: SceneEntityCfg,
-        left_finger_body_name: str = "panda_leftfinger",
-        right_finger_body_name: str = "panda_rightfinger",
-        max_reward: float = 300.0,
-        phase_one_only: bool = True,
-    ) -> torch.Tensor:
-        square = _closing_squareness(self._robot, self._slot, self._left_id, self._right_id)
-        delta = torch.where(self._fresh, torch.zeros_like(square), square - self._prev)
-        self._prev = square
-        self._fresh[:] = False
-        # Quiet in phase two, the same way the lift shaping is: the potential simply stops being
-        # paid out and everything already earned is kept. Not driven to zero -- that would claw the
-        # whole correction back in one spike on the step the sheet comes out of the slot, which is
-        # the last thing the extraction should be followed by.
-        if phase_one_only:
-            delta = delta * (~_phase_reached(env)).float()
-        # divided by step_dt so max_reward is the literal total for a full correction, matching the
-        # convention the other payouts in this file use
-        return delta * max_reward / env.step_dt
 
 
 class gripper_recommit_penalty(ManagerTermBase):
@@ -882,24 +1023,67 @@ def sheet_extracted(env: ManagerBasedRLEnv) -> torch.Tensor:
     return _phase_reached(env)
 
 
+class extraction_bonus(ManagerTermBase):
+    """One large payout on the step the sheet comes clear of the slot. Off at weight zero.
+
+    Phase one has no terminal reward of its own: the drape is what the episode is scored on, and
+    extraction is merely the gate to it, paid for through ``grasp_stage``'s shaping. With
+    ``scripts/train.py --phase_one`` that is no longer true -- the episode ends at extraction and
+    every phase-two reward is zeroed -- so the pick needs an outcome of its own to be worth
+    completing rather than approximating. This is it.
+
+    Left at weight zero in the normal task, where it would be an unpriced duplicate of the
+    extraction payout ``grasp_stage`` already makes, and where it would pull the policy towards
+    yanking the sheet out rather than towards drape-ready extraction.
+
+    Latched, so the bonus is collected once per episode and never becomes an annuity for holding the
+    sheet above the slot. The latch matters even though the flag also terminates on this condition:
+    the two are separate overrides and the term must be correct when armed on its own.
+
+    Note:
+        Divided by ``step_dt``, so :paramref:`bonus` is the literal one-shot payout in the same way
+        every other one-shot in this file is.
+
+    Args:
+        env: The environment.
+        bonus: Paid once, on the step the sheet clears the slot [reward].
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._paid = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self._paid[env_ids] = False
+
+    def __call__(self, env: ManagerBasedRLEnv, bonus: float = 1000.0) -> torch.Tensor:
+        earned = _phase_reached(env) & ~self._paid
+        self._paid |= earned
+        return bonus * earned.float() / env.step_dt
+
+
 class sheet_lift_progress(ManagerTermBase):
-    """Potential-based shaping that leads the policy up to the extraction bonus.
+    """Signed height-progress shaping, scaled by the current grasp alignment.
 
     Pays the *change* in a height potential rather than the height itself. The potential ramps
     linearly from 0 at the sheet's spawn height to 1 once its centre has risen
     :paramref:`lift_span` metres, and the reward each step is :paramref:`max_reward` times how much
     that potential grew. Since the increments telescope, an episode collects
     ``max_reward * potential`` in total no matter how slowly it climbs -- so
-    :paramref:`max_reward` is the *whole* payout for a full lift, not a per-step rate.
+    :paramref:`max_reward` is the payout for a full lift before applying
+    ``(alignment + alignment_offset) / alignment_max_reward``.
 
     Why the difference and not the level: a reward for *being* high pays every step the sheet is
     held up, which makes hovering below the extraction threshold indefinitely worth far more than
     extracting and moving on. Rewarding progress removes any gain from lingering, and it is
-    potential-based shaping in the standard sense, so it provably does not change which policy is
-    optimal -- it only makes the extraction bonus easier to find.
+    height-progress shaping, so lingering at one height produces no additional income.
 
-    The change is signed, so letting the sheet fall back refunds what the climb paid. That is what
-    stops the policy from farming the term by bobbing the sheet up and down.
+    The change is signed, so letting the sheet fall back is still penalized. Because the requested
+    alignment multiplier changes with the wrist pose, the scaled increments no longer telescope
+    exactly: losing alignment before descending can make the refund smaller than the earlier
+    payout. Alignment should therefore be monitored alongside lift reward during training.
 
     Once the sheet is extracted the term goes quiet. It is *not* driven to zero by the latch, which
     would claw back the whole climb in a single -``max_reward`` spike and teach the policy to avoid
@@ -909,6 +1093,9 @@ class sheet_lift_progress(ManagerTermBase):
         env: The environment.
         lift_span: Rise at which the potential reaches 1 [m].
         max_reward: Total paid over a full lift from the spawn height to :paramref:`lift_span`.
+        alignment_max_reward: Denominator of the alignment multiplier.
+        alignment_offset: Positive numerator offset that leaves a small lift signal at zero
+            alignment.
         asset_cfg: The deformable sheet.
     """
 
@@ -934,6 +1121,8 @@ class sheet_lift_progress(ManagerTermBase):
         env: ManagerBasedRLEnv,
         lift_span: float = 0.15,
         max_reward: float = 1000.0,
+        alignment_max_reward: float = 50.0,
+        alignment_offset: float = 1.0,
         asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
     ) -> torch.Tensor:
         # measured against the sheet's own spawn height rather than a hardcoded number, so it stays
@@ -955,18 +1144,23 @@ class sheet_lift_progress(ManagerTermBase):
         # 3.5 cm without ever completing a grasp, and learned to thrash the arm to do it.
         delta = delta * (_is_holding(env) & ~_phase_reached(env)).float()
 
-        # divided by step_dt so max_reward is the literal total for a full lift, matching the
-        # convention grasp_stage_reward uses for its one-shot bonuses
-        return delta * max_reward / env.step_dt
+        # Divide by step_dt so max_reward remains the full-lift base amount before alignment
+        # scaling, matching the convention grasp_stage_reward uses for its one-shot bonuses.
+        alignment = _alignment_multiplier(env, alignment_max_reward, alignment_offset)
+        return delta * max_reward * alignment / env.step_dt
 
 
 class grasp_stage_reward(ManagerTermBase):
     """Grasp the sheet by its top edge and hold it until it is out of the slot.
 
     Holding is *observed*, not inferred from a state machine: on every step the sheet counts as held
-    when the fingers are shut and there is a sheet node within :paramref:`capture_radius` of the
-    point between them. That is what a grasp physically is, and it is the only definition that
-    cannot disagree with what the simulation actually did.
+    when the fingers are shut **and there is cloth between the two pads**, per :meth:`_in_jaws`.
+    That is what a grasp physically is, and it is the only definition that cannot disagree with what
+    the simulation actually did.
+
+    Not a sphere around the grasp point, which is what this used to test. A sphere asks only whether
+    cloth is *near*, so a gripper snapping shut a few centimetres from the sheet passed it -- at the
+    configured 4 cm radius, with a wide margin of cloth it never touched.
 
     The earlier version tested a pose instead -- distance to the edge's centre, fingertips above the
     edge, hand within 32 degrees of straight down, closing axis within 32 degrees of the slot's
@@ -981,10 +1175,27 @@ class grasp_stage_reward(ManagerTermBase):
 
     * :paramref:`first_grasp_bonus`, once, the first time the sheet is held **by its top edge** --
       a node on the highest border is the one between the fingers.
-    * :paramref:`bad_closure_penalty`, whenever the gripper completes a closure with no cloth
+    * :paramref:`bad_closure_penalty`, whenever the gripper *commands* a closure with no cloth
       between the pads at all, so snapping shut in mid-air is never free.
     * :paramref:`extraction_bonus`, once the whole sheet is above :paramref:`slot_clear_height`
-      while held. Letting go before then costs :paramref:`premature_release_penalty`.
+      while held, scaled by ``(alignment + alignment_offset) / alignment_max_reward``. Letting go
+      before then costs :paramref:`premature_release_penalty`.
+
+    Note:
+        A closure is the step the gripper *command* goes from open to shut, read off the action
+        term's raw channel -- not the step the measured finger width crosses
+        :paramref:`closed_threshold`. The channel is one binary decision per step and the policy can
+        flip it far faster than the fingers can travel, so the width smooths most of the toggling
+        away: a policy commanding a dozen closures completes two or three measurable ones. Judging
+        on the width misses most bad closures outright, and dates the ones it catches to whenever
+        the joints happened to arrive rather than to the step the decision was made -- by which
+        point the hand has moved and the pose diagnostics sampled at that instant describe something
+        else. ``Events/closures``, ``Events/bad_closure`` and every ``at_closure`` gauge are all
+        sampled on this same commanded edge, so they describe one event rather than two.
+
+        The physical state still defines a *grasp*: ``holding`` requires the fingers actually shut on
+        cloth, since commanding a closure does not hold anything, and
+        :paramref:`premature_release_penalty` still keys on the measured width for the same reason.
 
     Note:
         Bonuses are divided by ``step_dt`` so the configured magnitudes are the literal one-shot
@@ -1005,8 +1216,18 @@ class grasp_stage_reward(ManagerTermBase):
         # the four borders of the node grid, as index rows. Which one is "the top" depends on how
         # the sheet was stood up and on how it has since deformed, so it is chosen per step by
         # height rather than fixed here.
+        # The commanded gripper bit, not the measured width, is what a "closure" is judged on --
+        # see the note in the class docstring. Threshold and sign are read off the action term
+        # rather than restated here, so the two cannot come to disagree about which way is open.
+        action_term = env.action_manager.get_term(cfg.params.get("action_term_name", "gripper_action"))
+        self._action_term = action_term
+        self._open_threshold = float(action_term.cfg.threshold)
+        self._open_is_positive = bool(action_term.cfg.positive_threshold)
+
         zeros = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        self._was_open = zeros.clone()
+        # commanded-open on the previous step; starts closed, so the first closure edge needs the
+        # policy to open first, exactly as ``gripper_recommit_penalty`` counts them
+        self._was_cmd_open = zeros.clone()
         self._holding = zeros.clone()
         self._grasped = zeros.clone()
 
@@ -1041,9 +1262,10 @@ class grasp_stage_reward(ManagerTermBase):
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
             env_ids = slice(None)
-        self._was_open[env_ids] = False
+        self._was_cmd_open[env_ids] = False
         self._holding[env_ids] = False
         self._grasped[env_ids] = False
+        _first_grasp(self._env)[env_ids] = False
         _is_holding(self._env)[env_ids] = False
         _early_release(self._env)[env_ids] = False
         # drop the environment back to phase one
@@ -1078,6 +1300,35 @@ class grasp_stage_reward(ManagerTermBase):
         offset = torch.tensor(grasp_offset, device=pose.device).expand(len(pose), 3)
         return pose[:, :3] + quat_apply(pose[:, 3:7], offset), pose[:, 3:7]
 
+    def _in_jaws(
+        self, points: torch.Tensor, capture_radius: float, pinch_margin: float
+    ) -> torch.Tensor:
+        """Which of ``points`` lie between the two finger pads. Shape ``(N, k)``.
+
+        The offset from the pinch midpoint is split along the closing axis, which must fall between
+        the pad faces, and across it, which :paramref:`capture_radius` bounds as the pad footprint.
+        The axis comes from the live finger poses, so it holds however the wrist is turned.
+
+        Args:
+            points: World positions to test. Shape ``(N, k, 3)``.
+            capture_radius: How far off the closing axis a point may sit [m].
+            pinch_margin: How far past a pad face a point may sit [m]. Sheet nodes are 25 mm apart,
+                so a real pinch can leave the nearest one just outside the jaws.
+        """
+        poses = self._robot.data.body_link_pose_w.torch
+        left = poses[:, self._left_id, :3]
+        right = poses[:, self._right_id, :3]
+
+        axis = right - left
+        gap = axis.norm(dim=-1, keepdim=True)
+        # shut fingers coincide, leaving no axis to project onto
+        axis_hat = axis / gap.clamp_min(1e-6)
+
+        offset = points - (0.5 * (left + right)).unsqueeze(1)
+        along = (offset * axis_hat.unsqueeze(1)).sum(dim=-1)
+        across = (offset - along.unsqueeze(-1) * axis_hat.unsqueeze(1)).norm(dim=-1)
+        return (along.abs() <= 0.5 * gap + pinch_margin) & (across <= capture_radius)
+
     def __call__(
         self,
         env: ManagerBasedRLEnv,
@@ -1091,6 +1342,7 @@ class grasp_stage_reward(ManagerTermBase):
         right_finger_body_name: str = "panda_rightfinger",
         grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.1034),
         capture_radius: float = 0.04,
+        pinch_margin: float = 0.010,
         open_threshold: float = 0.030,
         closed_threshold: float = 0.012,
         first_grasp_bonus: float = 200.0,
@@ -1098,6 +1350,8 @@ class grasp_stage_reward(ManagerTermBase):
         premature_release_penalty: float = 500.0,
         slot_clear_height: float = 0.17,
         extraction_bonus: float = 1000.0,
+        alignment_max_reward: float = 50.0,
+        alignment_offset: float = 1.0,
     ) -> torch.Tensor:
         nodes = self._sheet.data.nodal_pos_w.torch
         tip, hand_quat = self._grasp_frame(grasp_offset)
@@ -1114,15 +1368,22 @@ class grasp_stage_reward(ManagerTermBase):
         width = self._robot.data.joint_pos.torch[:, finger_cfg.joint_ids].mean(dim=1)
         is_open = width > open_threshold
         is_closed = width < closed_threshold
+        raw_gripper = self._action_term.raw_actions[:, 0]
+
+        # cloth in the jaws, not merely near the hand
+        pinched = self._in_jaws(nodes, capture_radius, pinch_margin).any(dim=1)
+        pinched_top = self._in_jaws(top_nodes, capture_radius, pinch_margin).any(dim=1)
 
         # -- the whole definition of a grasp: shut, with cloth between the pads
-        holding = is_closed & (sheet_dist < capture_radius)
-        hit = holding & (top_dist < capture_radius) & ~self._grasped
+        holding = is_closed & pinched
+        hit = holding & pinched_top & ~self._grasped
 
-        closed_now = self._was_open & is_closed
-        # closing on nothing at all. Judged on the same capture test, so a closure that caught the
-        # sheet is never charged, whatever posture it was made in.
-        bad_closure = closed_now & (sheet_dist >= capture_radius)
+        # a closure is the step the command goes open -> shut, not the step the width crosses the
+        # threshold: the policy flips the bit far faster than the fingers can travel
+        cmd_open = raw_gripper > self._open_threshold if self._open_is_positive else raw_gripper < self._open_threshold
+        closed_now = self._was_cmd_open & ~cmd_open
+        # closing on nothing, by the same jaw test, so this and ``holding`` cannot disagree
+        bad_closure = closed_now & ~pinched
         reward = first_grasp_bonus * hit.float() - bad_closure_penalty * bad_closure.float()
 
         phase = _phase_reached(env)
@@ -1137,13 +1398,14 @@ class grasp_stage_reward(ManagerTermBase):
         approach_z = quat_apply(hand_quat, unit_z)[:, 2]
         downward = 0.5 * (1.0 - approach_z)
         slot = env.scene[slot_cfg.name]
-        squareness = _closing_squareness(self._robot, slot, self._left_id, self._right_id)
+        squareness = _closing_squareness(self._robot, slot, self._hand_id)
         dist_to_edge = (tip - center).norm(dim=-1)
 
         # -- latch state for the next step
         self._grasped |= hit
+        _first_grasp(env).copy_(self._grasped)
         self._holding = holding
-        self._was_open = torch.where(is_open, True, torch.where(is_closed, False, self._was_open))
+        self._was_cmd_open = cmd_open
         _is_holding(env).copy_(holding)
 
         # -- phase one: pull the sheet clear of the slot.
@@ -1155,7 +1417,8 @@ class grasp_stage_reward(ManagerTermBase):
         # keyed on the observed hold, so a sheet that is demonstrably out of the slot and in the
         # gripper always counts, whether or not the grasp bonus happened to be awarded
         extracted = holding & ~phase & (lowest > slot_clear_height)
-        reward = reward + extraction_bonus * extracted.float()
+        alignment = _alignment_multiplier(env, alignment_max_reward, alignment_offset)
+        reward = reward + extraction_bonus * alignment * extracted.float()
         phase |= extracted
 
         self._steps += 1.0
@@ -1749,6 +2012,17 @@ class drape_milestones(ManagerTermBase):
       :paramref:`symmetry_span`. Coverage cannot see this -- it samples only the band's own surface,
       so a sheet bunched to one side can cover the region perfectly well while hanging all wrong.
 
+    That same evenness is then applied a second time, as a *multiplier* on the three milestones
+    above: ``symmetry_bonus * symmetry / symmetry_divisor``. So a square drape both earns the bonus
+    and collects its milestones in full (or better, when the divisor is smaller than the bonus),
+    while a lopsided one earns no bonus *and* keeps only a fraction of the milestone payout it would
+    otherwise have banked. Paying and gating on the same quantity is deliberate: paying alone left
+    finishing badly worth doing, since the milestones arrived intact either way.
+
+    The multiplier is measured live rather than at the moment of completion. Gating it on completion
+    would zero it on every other step and silently cancel the reach and touch bonuses, which fire on
+    their own steps and are latched -- they would never pay at all.
+
     Success is deliberately tested as a *state* rather than as the release event. Cloth settles: a
     sheet let go at 70% coverage may sag onto the band and pass 80% a few steps later, and that is
     a success by any reading of the task. Keying on the instant of release would miss it, and would
@@ -1797,7 +2071,14 @@ class drape_milestones(ManagerTermBase):
             grid is one larger in each direction; used to find the four corners.
         symmetry_bonus: Paid on top of :paramref:`success_bonus`, scaled by how evenly the sheet
             fell -- in full when every corner is on the table, tapering to nothing when the highest
-            corner is :paramref:`symmetry_span` above it [reward].
+            corner is :paramref:`symmetry_span` above it [reward]. Also forms the numerator of the
+            multiplier applied to the three milestones, see :paramref:`symmetry_divisor`.
+        symmetry_divisor: Denominator of that multiplier [reward]. The milestones are paid at face
+            value when ``symmetry_bonus * symmetry`` reaches this, so a divisor equal to
+            :paramref:`symmetry_bonus` gives a plain 0..1 scaling. A *smaller* divisor lets a square
+            drape earn more than face value -- 5000 over 4000 pays up to 1.25x -- which is a
+            deliberate premium on evenness, not an accident. Zero or less turns the scaling off and
+            pays the milestones flat, which is the default.
         symmetry_span: Corner height at which the symmetry bonus reaches zero [m].
     """
 
@@ -1867,6 +2148,7 @@ class drape_milestones(ManagerTermBase):
         success_bonus: float = 500.0,
         resolution: tuple[int, int] = (8, 8),
         symmetry_bonus: float = 0.0,
+        symmetry_divisor: float = 0.0,
         symmetry_span: float = 0.05,
     ) -> torch.Tensor:
         phase = _phase_reached(env)
@@ -1903,14 +2185,49 @@ class drape_milestones(ManagerTermBase):
         )
         corners_z = nodes[:, corner_ids, 2]
         # heights above the table, whose surface is zero in the environment frame
-        highest_corner = (corners_z - env.scene.env_origins[:, 2].unsqueeze(1)).max(dim=1).values
+        corner_heights = corners_z - env.scene.env_origins[:, 2].unsqueeze(1)
+        # all four republished, not just the one scored: a payout under its maximum is explained by
+        # which corner stayed up, which the max alone cannot say -- see :func:`drape_corner_heights`
+        drape_corner_heights(env).copy_(corner_heights)
+        highest_corner = corner_heights.max(dim=1).values
         symmetry = ((symmetry_span - highest_corner) / symmetry_span).clamp(0.0, 1.0)
 
-        reward = (
+        # -- the symmetry bonus, unchanged: still its own one-shot paid on completion
+        symmetry_payout = symmetry_bonus * symmetry * complete.float()
+
+        # -- and the same quantity again as a multiplier on the milestones.
+        #
+        # ``symmetry_bonus * symmetry / symmetry_divisor``, so with 5000 over 4000 a square drape
+        # scales the milestones by 1.25 and a sheet with a corner ``symmetry_span`` up scales them to
+        # nothing. Evenness therefore both pays and gates: the bonus rewards a square drape, and the
+        # multiplier means a lopsided one collects little of the milestone payout it would otherwise
+        # have banked in full.
+        #
+        # Deliberately *not* gated on ``complete`` the way the payout above is. The multiplier is a
+        # live measure of how the sheet is lying, and multiplying by a completion-gated quantity
+        # would make it zero on every step except the last, which would silently cancel the reach and
+        # touch bonuses -- those fire on their own steps, are latched, and would never pay again.
+        #
+        # A divisor of zero or less turns the scaling off and leaves the milestones at face value,
+        # so a config that does not ask for this is unaffected.
+        symmetry_scale = (
+            symmetry_bonus * symmetry / symmetry_divisor
+            if symmetry_divisor > 0.0
+            else torch.ones_like(symmetry)
+        )
+        milestones = (
             reach_bonus * reached.float()
             + touch_bonus * touched.float()
             + success_bonus * complete.float()
-            + symmetry_bonus * symmetry * complete.float()
+        )
+        reward = milestones * symmetry_scale + symmetry_payout
+
+        # Everything evenness did to this term, republished so a plot can separate it from the
+        # milestones at face value: the bonus it paid, plus what the multiplier added to or took off
+        # the milestones. Nominal milestones plus this is exactly what was paid. Divided by
+        # ``step_dt`` for the same reason the return is -- see :func:`drape_symmetry_payout`.
+        drape_symmetry_payout(env).copy_(
+            (symmetry_payout + milestones * (symmetry_scale - 1.0)) / env.step_dt
         )
 
         self._success_symmetry = torch.where(complete, symmetry, self._success_symmetry)

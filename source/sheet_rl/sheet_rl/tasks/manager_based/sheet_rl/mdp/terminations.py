@@ -14,7 +14,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply_inverse
 
-from .rewards import _drape_success, _early_release, _high_release, _table_drop
+from .rewards import _drape_success, _early_release, _high_release, _phase_reached, _table_drop
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -99,6 +99,35 @@ def drape_complete(env: ManagerBasedRLEnv) -> torch.Tensor:
     judged complete -- the latch is held rather than momentary precisely so that lag is harmless.
     """
     return _drape_success(env)
+
+
+def phase_one_finished(env: ManagerBasedRLEnv, enabled: bool = False) -> torch.Tensor:
+    """End the episode the moment the sheet is clear of the slot. Off unless armed.
+
+    Turns the task into extraction alone, for curriculum or ablation work: the drape never happens,
+    so nothing that follows extraction can shape the pick. Armed by ``scripts/train.py --phase_one``,
+    which also pays :class:`~.rewards.extraction_bonus` for arriving here and zeroes every phase-two
+    reward -- all three are needed together, and the flag is the supported way to get them.
+
+    The default is off rather than the term being absent, because a termination cannot be added from
+    the command line: only the values of terms already declared can be overridden. Declaring it
+    disabled is what makes the flag a pure set of Hydra overrides.
+
+    Reads the latch :class:`~.rewards.grasp_stage_reward` sets, the same one
+    :func:`~.rewards.sheet_extracted` publishes as the boundary between the phases, so "finished" here
+    means exactly what phase one means everywhere else.
+
+    Not flagged as a time-out: with the flag on, extraction *is* the goal, so this is a true terminal
+    state and the value function should not bootstrap past it.
+
+    Args:
+        env: The environment.
+        enabled: Whether the termination fires at all. ``False`` returns all-zero every step.
+    """
+    reached = _phase_reached(env)
+    if not enabled:
+        return torch.zeros_like(reached)
+    return reached
 
 
 def finger_in_slot(
