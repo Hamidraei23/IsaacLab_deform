@@ -46,6 +46,9 @@ from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import (
 )
 from isaaclab_tasks.utils import PresetCfg
 
+from .sheet_edge_marker import SheetEdgeMarkerCfg
+from .sheet_push import SheetPushCfg
+
 from .mdp import (
     ArmDrapePoseCommandCfg,
     randomize_arm_radius,
@@ -1278,8 +1281,23 @@ class SheetRlEnvCfg(FrankaClothEnvCfg):
     terminations: SheetTerminationsCfg = SheetTerminationsCfg()
     curriculum: SheetCurriculumCfg = SheetCurriculumCfg()
 
+    # A red dot on the middle of the sheet's lower edge, identified at reset and held for the rest
+    # of the episode. Drawn rather than simulated -- it has no collider and nothing in the MDP reads
+    # it -- so training and playback are unaffected. Switch it off with ``env.edge_marker.enabled=false``.
+    edge_marker: SheetEdgeMarkerCfg = SheetEdgeMarkerCfg()
+
+    # Press X in the viewer and that dot is pushed at 5 N for a quarter of a second, sideways and
+    # up. A real force in the solver rather than a written velocity, and equally invisible to the
+    # MDP -- see ``sheet_push``. Tunable from the command line, e.g. ``env.push.force=4.0``.
+    push: SheetPushCfg = SheetPushCfg()
+
     def __post_init__(self) -> None:
         super().__post_init__()
+        # the marker indexes the sheet's node grid, so it has to be told the same element counts the
+        # spawner, the observation and every border-reading reward term were given. Assigned here
+        # rather than defaulted in the marker's own config so ``SHEET_RESOLUTION`` stays the single
+        # authority -- importing it there would make the two modules import each other.
+        self.edge_marker.resolution = SHEET_RESOLUTION
         # the cloth task's physics preset couples the support blocks into the solver
         self.sim.physics = PhysicsCfg()
         # the inherited curriculum -- a gravity ramp starting near 0 g, and a ramp on an

@@ -12,9 +12,13 @@ from . import agents
 ##
 
 
+# On its own environment class rather than the stock one so the sheet can be poked while it runs:
+# a red dot is drawn on the middle of the sheet's lower edge and X pushes it in the Newton GL
+# viewer. Neither overlay is part of the MDP, so training and playback are unchanged until the key
+# is pressed. See ``PushableSheetEnv``.
 gym.register(
     id="Template-Sheet-Rl-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.sheet_rl_env:PushableSheetEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.sheet_rl_env_cfg:SheetRlEnvCfg",

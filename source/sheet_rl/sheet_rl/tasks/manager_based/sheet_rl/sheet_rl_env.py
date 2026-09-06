@@ -3,7 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""An environment that survives a single diverged simulation."""
+"""The task environments: one that can be poked while it runs, and one that also survives a
+diverged simulation."""
 
 from __future__ import annotations
 
@@ -11,8 +12,76 @@ import torch
 
 from isaaclab.envs import ManagerBasedRLEnv
 
+from .sheet_edge_marker import SheetEdgeMarker
+from .sheet_push import SheetPusher
 
-class DivergenceTolerantEnv(ManagerBasedRLEnv):
+
+class PushableSheetEnv(ManagerBasedRLEnv):
+    """The stock environment plus the two overlays that make the sheet pokable by hand.
+
+    :class:`~.sheet_edge_marker.SheetEdgeMarker` draws a red dot on the node at the middle of the
+    sheet's lower edge, latched at reset, and :class:`~.sheet_push.SheetPusher` applies a real force
+    to that node while ``X`` is pressed in the Newton GL viewer.
+
+    Neither is part of the MDP -- no observation, reward or termination reads either of them -- so
+    training and playback are bit-identical to the stock environment until the key is actually
+    pressed. That is what makes it safe to carry them on the *training* task rather than on an
+    evaluation-only variant: a probe you have to switch environments to use is a probe you will not
+    reach for when a policy does something odd on screen.
+
+    Both are optional and are built only when the config declares them, so this class is still usable
+    with a config that has neither field.
+
+    Note:
+        The pusher is constructed *before* ``super().__init__``. Its force is applied through a
+        callback that has to be registered before the solver captures its CUDA graph, and capture
+        happens inside the base initializer; registering afterwards leaves the launch outside the
+        graph, where it is silently never replayed and the key appears dead. See
+        :mod:`~.sheet_push`. The marker, which only draws, is built afterwards like any other
+        visualizer.
+    """
+
+    def __init__(self, cfg, render_mode: str | None = None, **kwargs):
+        # Register the callback before base initialization captures the CUDA graph.
+        push_cfg = getattr(cfg, "push", None)
+        self._pusher = (
+            SheetPusher(cfg.scene.num_envs, cfg.sim.device, push_cfg)
+            if push_cfg is not None and push_cfg.enabled
+            else None
+        )
+
+        super().__init__(cfg, render_mode=render_mode, **kwargs)
+
+        marker_cfg = getattr(self.cfg, "edge_marker", None)
+        self._edge_marker = (
+            SheetEdgeMarker(self, marker_cfg) if marker_cfg is not None and marker_cfg.enabled else None
+        )
+
+        if self._pusher is not None and self._edge_marker is not None:
+            self._pusher.bind(self, self._edge_marker)
+        elif self._pusher is not None:
+            # The push requires the marker's target node.
+            print("[sheet_rl] the lower-edge marker is off, so the sheet push has no target and is inactive.")
+            self._pusher = None
+
+    def step(self, action: torch.Tensor):
+        obs, reward, terminated, truncated, extras = super().step(action)
+
+        # Clear overlay state belonging to completed episodes.
+        dones = terminated | truncated
+        if self._edge_marker is not None:
+            self._edge_marker.clear_latch(dones)
+            # Latch from final or freshly reset particle positions.
+            self._edge_marker.update()
+        if self._pusher is not None:
+            self._pusher.clear(dones)
+            # Target the node selected by the marker above.
+            self._pusher.update()
+
+        return obs, reward, terminated, truncated, extras
+
+
+class DivergenceTolerantEnv(PushableSheetEnv):
     """Replaces non-finite rewards with zero, so one blown-up environment cannot end the run.
 
     The sculpted arm occasionally drives an environment to a state the solver cannot resolve: on the
@@ -49,7 +118,8 @@ class DivergenceTolerantEnv(ManagerBasedRLEnv):
     Note:
         Used by the hand task, whose mesh arm is what provokes this. The base task's capsule has
         never produced a non-finite state -- 1024 environments under random actions ran clean -- so
-        it is left on the stock environment rather than carrying a guard it does not need.
+        it runs on :class:`PushableSheetEnv` directly rather than carrying a guard it does not need.
+        The overlays are inherited from there, so both tasks are poked the same way.
     """
 
     def step(self, action: torch.Tensor):
