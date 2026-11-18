@@ -1,0 +1,54 @@
+{
+  "baseline_900": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_grasp/main_train_grasp/model_900_std06.pt",
+    "seed": 42,
+    "episodes": 64,
+    "success_rate": 1.0,
+    "episode_seconds_mean": 0.9708333333333333,
+    "joint_velocity_p95": 0.8927578926086426,
+    "joint_acceleration_p95": 7.945440292358398,
+    "joint_acceleration_max": 56.653743743896484,
+    "joint_jerk_p95": 311.6084899902344,
+    "first_hold_linear_speed_median": 0.3337407112121582,
+    "first_hold_angular_speed_median": 0.7303507328033447
+  },
+  "baseline_920": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_grasp/2026-09-22_18-03-49_platform_grasp_from_900/model_920.pt",
+    "seed": 42,
+    "episodes": 64,
+    "success_rate": 1.0,
+    "episode_seconds_mean": 1.0515625,
+    "joint_velocity_p95": 0.8725523948669434,
+    "joint_acceleration_p95": 7.918621063232422,
+    "joint_acceleration_max": 24.235431671142578,
+    "joint_jerk_p95": 303.2206726074219,
+    "first_hold_linear_speed_median": 0.3101979196071625,
+    "first_hold_angular_speed_median": 0.726416826248169
+  },
+  "filtered_900": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_grasp/main_train_grasp/model_900_std06.pt",
+    "seed": 42,
+    "episodes": 64,
+    "success_rate": 1.0,
+    "episode_seconds_mean": 1.9729166666666667,
+    "joint_velocity_p95": 0.5339161157608032,
+    "joint_acceleration_p95": 4.18138313293457,
+    "joint_acceleration_max": 59.85438537597656,
+    "joint_jerk_p95": 138.8905792236328,
+    "first_hold_linear_speed_median": 0.2287115454673767,
+    "first_hold_angular_speed_median": 0.650540828704834
+  },
+  "progress_v2_final": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/progress_v2/model_final.pt",
+    "seed": 42,
+    "episodes": 64,
+    "success_rate": 1.0,
+    "episode_seconds_mean": 1.9203124999999999,
+    "joint_velocity_p95": 0.5799527168273926,
+    "joint_acceleration_p95": 3.602527618408203,
+    "joint_acceleration_max": 36.55595779418945,
+    "joint_jerk_p95": 88.62419891357422,
+    "first_hold_linear_speed_median": 0.20923110842704773,
+    "first_hold_angular_speed_median": 0.549471914768219
+  }
+}

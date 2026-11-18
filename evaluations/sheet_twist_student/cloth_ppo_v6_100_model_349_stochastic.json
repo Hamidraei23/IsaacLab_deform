@@ -1,0 +1,15 @@
+{
+  "student": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_twist/cloth_ppo_v6_100/model_349.pt",
+  "edge": "right",
+  "result": {
+    "held": 0.890625,
+    "extracted": 0.609375,
+    "released": 0.5703125,
+    "early_end": 0.0234375,
+    "best_released_coverage": 0.1871337890625,
+    "final_coverage": 0.15020751953125,
+    "return": 218.67534570151474,
+    "episodes": 128,
+    "best_released_coverage_sem": 0.02278594998742741
+  }
+}

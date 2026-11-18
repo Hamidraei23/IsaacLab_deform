@@ -1,0 +1,15 @@
+{
+  "student": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_twist/cv1008_r1/model_249.pt",
+  "edge": "right",
+  "result": {
+    "held": 1.0,
+    "extracted": 0.6796875,
+    "released": 0.375,
+    "early_end": 0.0078125,
+    "best_released_coverage": 0.1004638671875,
+    "final_coverage": 0.24652099609375,
+    "return": 292.0762779833749,
+    "episodes": 128,
+    "best_released_coverage_sem": 0.020656619377468488
+  }
+}

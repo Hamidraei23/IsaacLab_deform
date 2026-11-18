@@ -1,0 +1,28 @@
+{
+  "seed": 42,
+  "matched_initial_positions_and_targets": true,
+  "joint": {
+    "episodes": 20,
+    "success_10cm": 13,
+    "success_5cm": 6,
+    "timeouts": 20,
+    "drops": 0,
+    "final_within_10cm": 4,
+    "mean_min_distance_m": 0.07603258220478892,
+    "mean_final_distance_m": 0.1365490833297372,
+    "mean_ee_speed_rms_m_s": 0.7491703432710931,
+    "mean_ee_accel_rms_m_s2": 12.936369711985302
+  },
+  "twist": {
+    "episodes": 20,
+    "success_10cm": 14,
+    "success_5cm": 8,
+    "timeouts": 20,
+    "drops": 0,
+    "final_within_10cm": 5,
+    "mean_min_distance_m": 0.07418036879971623,
+    "mean_final_distance_m": 0.17487573716789484,
+    "mean_ee_speed_rms_m_s": 0.7449691892829529,
+    "mean_ee_accel_rms_m_s2": 13.486098235988104
+  }
+}

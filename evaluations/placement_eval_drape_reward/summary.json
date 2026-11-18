@@ -1,0 +1,462 @@
+{
+  "18-51-43_placement_v7b@800": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/2026-09-24_18-51-43_placement_from_v7b_closure/model_800.pt",
+    "episodes": 32,
+    "extracted": 0.90625,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.09375,
+    "aborted": 0.3125,
+    "success": 0.0,
+    "best_coverage": 0.001953125,
+    "center_progress": 0.37814220786094666,
+    "episode_seconds": 11.489583969116211,
+    "return": -432.41927993297577,
+    "terms": {
+      "table_clearance": -0.14444434642791748,
+      "ee_speed": 0.0,
+      "grasp_stage": 191.04689025878906,
+      "grasp_progress": 96.92375946044922,
+      "lift_milestones": 5133.1611328125,
+      "gripper_closures": -23.437501907348633,
+      "motion_cost": -4627.3779296875,
+      "placement": -1202.5911865234375
+    },
+    "placement_parts": {
+      "approach": 336.78857421875,
+      "goal_proximity": 1.5399281978607178,
+      "coverage": 0.4443359375,
+      "release": 0.0,
+      "high_release": -89.6442642211914,
+      "abort": -468.75,
+      "retreat": 116.22457122802734,
+      "hold_over_target": 0.0,
+      "blocked": 0.0,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -1099.1943359375
+    },
+    "endings": {
+      "deformable_out_of_bounds": 13,
+      "released_high": 10,
+      "time_out": 4,
+      "ee_below_table": 4,
+      "joint_vel_out_of_limit": 1
+    }
+  },
+  "19-17-18_placement_v7b@1060": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/2026-09-24_19-17-18_placement_from_v7b_closure/model_1060.pt",
+    "episodes": 32,
+    "extracted": 0.78125,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.0,
+    "aborted": 0.78125,
+    "success": 0.0,
+    "best_coverage": 0.012451171875,
+    "center_progress": 0.5681775212287903,
+    "episode_seconds": 9.051042556762695,
+    "return": 743.7066955566406,
+    "terms": {
+      "table_clearance": 0.0,
+      "ee_speed": 0.0,
+      "grasp_stage": 165.43751525878906,
+      "grasp_progress": 92.2677230834961,
+      "lift_milestones": 4693.30126953125,
+      "gripper_closures": -96.87500762939453,
+      "motion_cost": -2601.58251953125,
+      "placement": -1508.84228515625
+    },
+    "placement_parts": {
+      "approach": 701.116943359375,
+      "goal_proximity": 4.952939987182617,
+      "coverage": 0.56640625,
+      "release": 0.0,
+      "high_release": 0.0,
+      "abort": -1171.875,
+      "retreat": 5.1700364565476775e-05,
+      "hold_over_target": 0.0,
+      "blocked": 0.0,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -1043.603515625
+    },
+    "endings": {
+      "released_high": 25,
+      "time_out": 7
+    }
+  },
+  "20-05-04_placement_v7b@1340": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/2026-09-24_20-05-04_placement_from_v7b_closure/model_1340.pt",
+    "episodes": 32,
+    "extracted": 1.0,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.0,
+    "aborted": 0.03125,
+    "success": 0.0,
+    "best_coverage": 0.263916015625,
+    "center_progress": 0.8196189403533936,
+    "episode_seconds": 32.57291793823242,
+    "return": -5920.911188960075,
+    "terms": {
+      "table_clearance": -0.25448834896087646,
+      "ee_speed": 0.0,
+      "grasp_stage": 210.00001525878906,
+      "grasp_progress": 101.4394760131836,
+      "lift_milestones": 5386.421875,
+      "gripper_closures": -3.125000476837158,
+      "motion_cost": -13729.7939453125,
+      "placement": 2114.40087890625
+    },
+    "placement_parts": {
+      "approach": 1130.451171875,
+      "goal_proximity": 125.56144714355469,
+      "coverage": 2102.7490234375,
+      "release": 0.0,
+      "high_release": 0.0,
+      "abort": -46.875,
+      "retreat": 0.8221521377563477,
+      "hold_over_target": -182.5,
+      "blocked": 0.0,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -1015.80810546875
+    },
+    "endings": {
+      "time_out": 30,
+      "ee_below_table": 1,
+      "released_high": 1
+    }
+  },
+  "21-17-54_placement_v7b@820": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/2026-09-24_21-17-54_placement_from_v7b_closure/model_820.pt",
+    "episodes": 32,
+    "extracted": 0.90625,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.0,
+    "aborted": 0.40625,
+    "success": 0.0,
+    "best_coverage": 0.0289306640625,
+    "center_progress": 0.4083261489868164,
+    "episode_seconds": 20.010417938232422,
+    "return": -3160.865753158927,
+    "terms": {
+      "table_clearance": -0.2077932208776474,
+      "ee_speed": 0.0,
+      "grasp_stage": 191.09376525878906,
+      "grasp_progress": 89.47679138183594,
+      "lift_milestones": 5197.43798828125,
+      "gripper_closures": -15.625000953674316,
+      "motion_cost": -7360.8828125,
+      "placement": -1262.15869140625
+    },
+    "placement_parts": {
+      "approach": 404.8010559082031,
+      "goal_proximity": 4.881175994873047,
+      "coverage": 9.9609375,
+      "release": 0.0,
+      "high_release": 0.0,
+      "abort": -609.375,
+      "retreat": 3.000473976135254,
+      "hold_over_target": 0.0,
+      "blocked": 0.0,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -1075.42724609375
+    },
+    "endings": {
+      "released_high": 13,
+      "deformable_out_of_bounds": 12,
+      "time_out": 7
+    }
+  },
+  "21-36-39_placement_wandb@920": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/2026-09-24_21-36-39_placement_v7b_closure_wandb/model_920.pt",
+    "episodes": 32,
+    "extracted": 0.90625,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.15625,
+    "aborted": 0.1875,
+    "success": 0.0,
+    "best_coverage": 0.013427734375,
+    "center_progress": 0.36619800329208374,
+    "episode_seconds": 30.125001907348633,
+    "return": -7761.981105286628,
+    "terms": {
+      "table_clearance": -0.042588669806718826,
+      "ee_speed": 0.0,
+      "grasp_stage": 191.09376525878906,
+      "grasp_progress": 95.06403350830078,
+      "lift_milestones": 4999.5791015625,
+      "gripper_closures": -23.437501907348633,
+      "motion_cost": -12019.5224609375,
+      "placement": -1004.7154541015625
+    },
+    "placement_parts": {
+      "approach": 319.59442138671875,
+      "goal_proximity": 43.710594177246094,
+      "coverage": 108.6767578125,
+      "release": 0.0,
+      "high_release": -113.08409881591797,
+      "abort": -281.25,
+      "retreat": 5.417588710784912,
+      "hold_over_target": 0.0,
+      "blocked": 0.0,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -1087.78076171875
+    },
+    "endings": {
+      "time_out": 25,
+      "released_high": 6,
+      "ee_below_table": 1
+    }
+  },
+  "placement_1320_release_window@3319": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/placement_1320_release_window/model_3319.pt",
+    "episodes": 32,
+    "extracted": 0.96875,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.0,
+    "aborted": 0.0,
+    "success": 0.0,
+    "best_coverage": 0.5159912109375,
+    "center_progress": 0.8483136892318726,
+    "episode_seconds": 33.333335876464844,
+    "return": 2462.3625984191895,
+    "terms": {
+      "table_clearance": -4.400371551513672,
+      "ee_speed": 0.0,
+      "grasp_stage": 203.75001525878906,
+      "grasp_progress": 110.83326721191406,
+      "lift_milestones": 5381.01611328125,
+      "gripper_closures": 0.0,
+      "motion_cost": -8099.583984375,
+      "placement": 4870.74755859375
+    },
+    "placement_parts": {
+      "approach": 1246.335205078125,
+      "goal_proximity": 913.9362182617188,
+      "coverage": 15613.7451171875,
+      "release": 0.0,
+      "high_release": 0.0,
+      "abort": 0.0,
+      "retreat": 0.0,
+      "hold_over_target": -3808.90625,
+      "blocked": -8497.5,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -596.86279296875
+    },
+    "endings": {
+      "time_out": 32
+    }
+  },
+  "placement_3319_joint_limits@3340": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/placement_3319_joint_limits/model_3340.pt",
+    "episodes": 32,
+    "extracted": 1.0,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.0,
+    "aborted": 0.0,
+    "success": 0.0,
+    "best_coverage": 0.460693359375,
+    "center_progress": 0.8110346794128418,
+    "episode_seconds": 33.333335876464844,
+    "return": 2681.036178588867,
+    "terms": {
+      "table_clearance": -4.772734642028809,
+      "ee_speed": 0.0,
+      "grasp_stage": 210.00001525878906,
+      "grasp_progress": 100.17755126953125,
+      "lift_milestones": 5399.57861328125,
+      "gripper_closures": -4.687500953674316,
+      "motion_cost": -7743.76025390625,
+      "placement": 4724.50048828125
+    },
+    "placement_parts": {
+      "approach": 1111.0126953125,
+      "goal_proximity": 1028.4676513671875,
+      "coverage": 12876.8359375,
+      "release": 0.0,
+      "high_release": 0.0,
+      "abort": 0.0,
+      "retreat": 0.0,
+      "hold_over_target": -4313.4375,
+      "blocked": -5296.25,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -682.12890625
+    },
+    "endings": {
+      "time_out": 32
+    }
+  },
+  "placement_880_open_intent@920": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/placement_880_open_intent/model_920.pt",
+    "episodes": 32,
+    "extracted": 0.875,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.0,
+    "aborted": 0.21875,
+    "success": 0.0,
+    "best_coverage": 0.0440673828125,
+    "center_progress": 0.36694061756134033,
+    "episode_seconds": 29.28437614440918,
+    "return": -7464.98863902688,
+    "terms": {
+      "table_clearance": -0.06891551613807678,
+      "ee_speed": 0.0,
+      "grasp_stage": 184.39064025878906,
+      "grasp_progress": 93.81464385986328,
+      "lift_milestones": 4718.4541015625,
+      "gripper_closures": -67.18750762939453,
+      "motion_cost": -11663.43359375,
+      "placement": -730.9580078125
+    },
+    "placement_parts": {
+      "approach": 336.01324462890625,
+      "goal_proximity": 53.09593200683594,
+      "coverage": 256.8505859375,
+      "release": 0.0,
+      "high_release": 0.0,
+      "abort": -328.125,
+      "retreat": 8.372872352600098,
+      "hold_over_target": 0.0,
+      "blocked": 0.0,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -1057.16552734375
+    },
+    "endings": {
+      "time_out": 25,
+      "released_high": 6,
+      "time_out,released_high": 1
+    }
+  },
+  "placement_880_open_intent_g1@920": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/placement_880_open_intent_g1/model_920.pt",
+    "episodes": 32,
+    "extracted": 0.9375,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.0,
+    "aborted": 0.125,
+    "success": 0.0,
+    "best_coverage": 0.0670166015625,
+    "center_progress": 0.4294055104255676,
+    "episode_seconds": 31.567710876464844,
+    "return": -7030.162172600627,
+    "terms": {
+      "table_clearance": -0.19817189872264862,
+      "ee_speed": 0.0,
+      "grasp_stage": 197.21876525878906,
+      "grasp_progress": 98.35663604736328,
+      "lift_milestones": 5069.5263671875,
+      "gripper_closures": -32.812503814697266,
+      "motion_cost": -12144.2919921875,
+      "placement": -217.96127319335938
+    },
+    "placement_parts": {
+      "approach": 406.889892578125,
+      "goal_proximity": 1.0997977256774902,
+      "coverage": 588.9013671875,
+      "release": 0.0,
+      "high_release": 0.0,
+      "abort": -187.5,
+      "retreat": 0.272075355052948,
+      "hold_over_target": 0.0,
+      "blocked": 0.0,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -1027.62451171875
+    },
+    "endings": {
+      "time_out": 27,
+      "released_high": 4,
+      "ee_below_table": 1
+    }
+  },
+  "placement_880_open_intent_g2@1440": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/placement_880_open_intent_g2/model_1440.pt",
+    "episodes": 32,
+    "extracted": 0.9375,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.0,
+    "aborted": 0.0,
+    "success": 0.0,
+    "best_coverage": 0.0203857421875,
+    "center_progress": 0.2623105049133301,
+    "episode_seconds": 28.182292938232422,
+    "return": 4521.2565963715315,
+    "terms": {
+      "table_clearance": -0.13484473526477814,
+      "ee_speed": 0.0,
+      "grasp_stage": 197.48439025878906,
+      "grasp_progress": 95.9625473022461,
+      "lift_milestones": 5271.880859375,
+      "gripper_closures": -1.562500238418579,
+      "motion_cost": -244.8022003173828,
+      "placement": -797.5716552734375
+    },
+    "placement_parts": {
+      "approach": 218.6837158203125,
+      "goal_proximity": 0.578094482421875,
+      "coverage": 61.279296875,
+      "release": 0.0,
+      "high_release": 0.0,
+      "abort": 0.0,
+      "retreat": 0.0,
+      "hold_over_target": 0.0,
+      "blocked": 0.0,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -1078.11279296875
+    },
+    "endings": {
+      "time_out": 23,
+      "ee_below_table": 8,
+      "deformable_out_of_bounds": 1
+    }
+  },
+  "18-02-20_grasp_v7b_closure@720": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/2026-09-24_18-02-20_grasp_v7b_closure/model_720.pt",
+    "episodes": 32,
+    "extracted": 0.96875,
+    "released_low": 0.0,
+    "high_releases_per_episode": 0.21875,
+    "aborted": 0.0625,
+    "success": 0.0,
+    "best_coverage": 0.0,
+    "center_progress": 0.005292460322380066,
+    "episode_seconds": 8.660417556762695,
+    "return": 1639.4091365337372,
+    "terms": {
+      "table_clearance": -1.2087068557739258,
+      "ee_speed": 0.0,
+      "grasp_stage": 203.56251525878906,
+      "grasp_progress": 101.16348266601562,
+      "lift_milestones": 5233.611328125,
+      "gripper_closures": -1.562500238418579,
+      "motion_cost": -2606.234375,
+      "placement": -1289.922607421875
+    },
+    "placement_parts": {
+      "approach": 3.0134401321411133,
+      "goal_proximity": 0.0,
+      "coverage": 0.0,
+      "release": 0.0,
+      "high_release": -102.09652709960938,
+      "abort": -93.75,
+      "retreat": 2.910569190979004,
+      "hold_over_target": 0.0,
+      "blocked": 0.0,
+      "open_intent": 0.0,
+      "success": 0.0,
+      "failure": -1100.0
+    },
+    "endings": {
+      "deformable_out_of_bounds": 22,
+      "ee_below_table": 4,
+      "time_out": 4,
+      "released_high": 2
+    }
+  }
+}

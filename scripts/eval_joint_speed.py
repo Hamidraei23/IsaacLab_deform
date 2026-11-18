@@ -14,12 +14,55 @@ Written as its own script because ``scripts/play.py`` hands straight off to Isaa
 backend, whose rollout loop has no per-step hook to record from.
 
 Reports, per arm joint, the median, 95th percentile and maximum angular speed, alongside the
-end-effector's linear speed, and writes a three-panel plot next to the checkpoint.
+end-effector's linear speed. The same rollout also records what every reward term paid on every
+step. The two answer different questions about one run -- how the arm moved, and what it was paid
+for -- and recording both from a single rollout means they describe the *same* episodes rather than
+two runs that happened to be configured alike.
 
-The same rollout also records what every reward term paid on every step, and writes a second figure
-beside the first. The two answer different questions about one run -- how the arm moved, and what it
-was paid for -- and recording both from a single rollout means they describe the *same* episodes
-rather than two runs that happened to be configured alike.
+**Everything drawn is drawn per episode.** A rollout is several attempts one after another, and a
+figure spanning all of them averages a good episode with a failed one and shows the mean of two
+things that never happened. Each episode therefore gets its own files, written into ``episodes``
+beside the checkpoint, and the script asks whether its plots are worth keeping *as each episode
+ends* -- answer ``a`` to stop asking and keep them all, ``q`` to stop asking and keep none. The
+rollout pauses while it waits, viewer included, which is the point: it is a chance to look at what
+just happened before deciding. Every answer then carries on to the next episode, ``n`` included --
+declining the pictures declines the pictures, it does not end the run. Pass ``--save_plots
+all``/``none`` to decide up front, or ``--rollout_plots`` to also get the two whole-rollout figures
+this script used to write on its own.
+
+Per episode, four figures and two tables:
+
+* ``ep<n>_corners.csv`` / ``.png`` -- the sheet's four corner nodes in world coordinates, one row
+  per control step.
+* ``ep<n>_ee_pose.csv`` / ``.png`` -- the hand's 6-D pose, ``x, y, z`` and roll/pitch/yaw, in metres
+  and radians in the file and degrees on the plot. All six are *relative to where the episode
+  started*: the first sample is subtracted, so every episode opens at ``0, 0, 0`` and ``0, 0, 0``
+  and two of them can be laid over each other whatever reset poses they were dealt. The angles are
+  unwrapped before that, so a roll through the +/-180 boundary reads as a continuous turn rather
+  than a jump. The absolute start is printed with the file and named on the figure, so nothing is
+  lost by it.
+* ``ep<n>_joint_speed.png`` and ``ep<n>_rewards.png`` -- the two original figures, over that
+  episode alone.
+
+Every figure washes the same interval over itself: from the moment the gripper first holds the sheet
+to the moment it comes clear of the slot. Both moments are read off the reward terms' own flags --
+the observed grasp ``grasp_stage_reward`` publishes and the phase latch it sets on extraction -- so
+the shaded region is the one the policy was actually paid for, and the same instants line up across
+all four plots. An episode that grasped but never extracted is shaded from the grasp to its end and
+labelled as such; one that never grasped is not shaded at all.
+
+The CSVs are written whatever the answer to the prompt: the numbers are the record, the pictures
+are a convenience.
+
+**The run does not stop on its own.** Episodes keep coming until Ctrl-C: each runs to its own
+ending or to ``--steps``, whichever arrives first, and one cut short by that limit is written,
+marked ``_partial``, and followed by an explicit reset so the next record starts from a fresh sheet
+rather than from one already halfway draped. ``--steps`` is therefore the longest episode to record,
+not a budget for the run. Ctrl-C stops after the episode in progress, which is left unwritten, and
+the summary tables are still printed.
+
+The records come from one environment, ``--env_index``, because an episode is a property of an
+environment.
 
 Usage::
 
@@ -31,7 +74,9 @@ Usage::
 
 import argparse
 import contextlib
+import csv
 import importlib.metadata as metadata
+import itertools
 import os
 import sys
 
@@ -40,6 +85,7 @@ import torch
 from isaaclab.app import add_launcher_args, launch_simulation
 from isaaclab.envs import DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg
 from isaaclab.utils.assets import retrieve_file_path
+from isaaclab.utils.math import euler_xyz_from_quat
 from isaaclab.utils.string import list_intersection
 
 from isaaclab_rl.entrypoints.backends import cli_args_rsl_rl as cli_args
@@ -57,6 +103,7 @@ from isaaclab_tasks.utils import get_checkpoint_path, setup_preset_cli
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import sheet_rl.tasks  # noqa: F401
+from sheet_rl.tasks.manager_based.sheet_rl.mdp import grasp_debug, sheet_extracted
 
 with contextlib.suppress(ImportError):
     import isaaclab_tasks_experimental  # noqa: F401
@@ -71,7 +118,13 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point", help="RL agent configuration entry point.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
-parser.add_argument("--steps", type=int, default=600, help="Environment steps to record.")
+parser.add_argument(
+    "--steps",
+    type=int,
+    default=600,
+    help="Longest episode to record, in steps. Not a budget for the run: episodes keep coming"
+    " until Ctrl-C.",
+)
 parser.add_argument("--warmup", type=int, default=30, help="Steps to discard before recording.")
 parser.add_argument("--out", type=str, default=None, help="Plot path. Defaults to beside the checkpoint.")
 parser.add_argument(
@@ -79,6 +132,29 @@ parser.add_argument(
 )
 parser.add_argument(
     "--no_rewards", action="store_true", default=False, help="Skip recording and plotting the reward terms."
+)
+parser.add_argument(
+    "--env_index", type=int, default=0, help="Which environment the per-episode records describe."
+)
+parser.add_argument(
+    "--out_dir",
+    type=str,
+    default=None,
+    help="Where the per-episode files go. Defaults to 'episodes' beside the checkpoint.",
+)
+parser.add_argument(
+    "--save_plots",
+    type=str,
+    default="ask",
+    choices=("ask", "all", "none"),
+    help="Per-episode plots: ask after each episode, save them all, or save none. The CSVs are"
+    " written either way. Falls back to 'all' when stdin is not a terminal.",
+)
+parser.add_argument(
+    "--rollout_plots",
+    action="store_true",
+    default=False,
+    help="Also write the two whole-rollout figures this script used to write on its own.",
 )
 parser.add_argument(
     "--train_env_cfg", action="store_true", default=False, help="Use the training env config rather than play mode."
@@ -105,7 +181,221 @@ def _summarize(speeds: torch.Tensor, names: list[str], limits) -> list[tuple[str
     return rows
 
 
-def _plot(path, joint_speeds, ee_speed, names, dt, commanded_cap):
+def _ask_save(prompt: str, mode: str) -> tuple[bool, str]:
+    """Ask whether this episode's plots should be written.
+
+    Blocks the run while it waits, viewer included -- which is the point: it is a chance to look at
+    what just happened before deciding to keep it.
+
+    Args:
+        prompt: What to show, already describing the episode that just ended.
+        mode: ``ask`` to ask, ``all`` to save without asking, ``none`` to skip without asking.
+
+    Returns:
+        Whether to save this episode, and the mode to carry into the next one -- ``a`` and ``q``
+        answer for the whole rest of the run.
+    """
+    if mode != "ask":
+        return mode == "all", mode
+    try:
+        # every answer carries on with the rollout; ``n`` and ``q`` decline the pictures, they do
+        # not stop the recording
+        answer = (
+            input(f"{prompt} save plots? [y]es / [n]o / [a]ll / [q]uit asking, then keep recording (y): ")
+            .strip()
+            .lower()
+        )
+    except EOFError:
+        # stdin closed mid-run: keep everything rather than silently dropping it
+        return True, "all"
+    if answer.startswith("a"):
+        return True, "all"
+    if answer.startswith("q"):
+        return False, "none"
+    return not answer.startswith("n"), "ask"
+
+
+HIGHLIGHT_COLOR = "#4f81bd"
+"""Wash used for the grasp-to-extraction interval. The same blue the reward bars use."""
+
+
+def _grasp_span(times, holding, extracted):
+    """When the sheet was taken hold of and when it came clear of the slot.
+
+    Both flags are the reward terms' own: ``holding`` is the observed grasp -- gripper shut with
+    cloth between the pads -- that :class:`grasp_stage_reward` publishes each step, and ``extracted``
+    is the phase latch it sets once the whole sheet is above the slot walls. Reading them rather
+    than re-deriving the conditions here means the shaded interval is the one the rewards were paid
+    for, not an approximation of it.
+
+    Args:
+        times: Time of each sample [s]. Shape ``(steps,)``.
+        holding: Whether the sheet was held on each step. Shape ``(steps,)``.
+        extracted: Whether the extraction latch was set on each step. Same shape.
+
+    Returns:
+        ``(start, stop, label)`` in seconds, or ``None`` when the episode never grasped, or when it
+        was already past both by the time recording began -- a partial first episode can start with
+        the latch already set, and there is no interval to draw for something that happened before
+        the first sample.
+    """
+    grasps = holding.nonzero(as_tuple=True)[0]
+    if not len(grasps):
+        return None
+    start = int(grasps[0])
+
+    # an episode already holding on its first sample was grasped before recording began -- during
+    # the warmup, or in the part of a partial episode that was never seen -- so the shading marks
+    # where the record starts rather than where the grasp happened, and says so
+    opening = "already holding" if bool(holding[0]) else "grasp"
+
+    extractions = extracted.nonzero(as_tuple=True)[0]
+    if len(extractions) and int(extractions[0]) > start:
+        stop = int(extractions[0])
+        return float(times[start]), float(times[stop]), f"{opening} to extraction"
+    if len(extractions):
+        # the latch was already set when the recording started, so the grasp being seen here is a
+        # hold during the drape rather than the one that pulled the sheet out
+        return None
+    # held, but never got it clear of the slot: the interval is still the interesting part of the
+    # episode, and saying where it stops matters
+    return float(times[start]), float(times[-1]), f"{opening} onwards (never extracted)"
+
+
+def _shade(axes, highlight) -> None:
+    """Wash the grasp-to-extraction interval across every time-series panel given.
+
+    Call it before the legends are built, so the label lands in them.
+    """
+    if highlight is None:
+        return
+    start, stop, label = highlight
+    for index, axis in enumerate(axes):
+        axis.axvspan(
+            start, stop, color=HIGHLIGHT_COLOR, alpha=0.13, zorder=0, label=label if index == 0 else None
+        )
+
+
+def _write_csv(path: str, header: list[str], rows) -> None:
+    """Write one table, one row per control step."""
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def _plot_corners(path, times, corners, title, highlight=None):
+    """Plot the sheet's four corners, one panel per world axis.
+
+    Args:
+        path: Where to write the PNG.
+        times: Time of each sample [s]. Shape ``(steps,)``.
+        corners: World positions of the four corners. Shape ``(steps, 4, 3)``.
+        title: Episode label for the figure.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True, constrained_layout=True)
+    figure.suptitle(f"Sheet corners -- {title}")
+    _shade(axes, highlight)
+    names = ("corner 0 (0,0)", "corner 1 (0,n)", "corner 2 (n,0)", "corner 3 (n,n)")
+    for axis_index, axis_name in enumerate("xyz"):
+        for corner_index, name in enumerate(names):
+            axes[axis_index].plot(times, corners[:, corner_index, axis_index], linewidth=1.2, label=name)
+        axes[axis_index].set_ylabel(f"{axis_name} [m]")
+        axes[axis_index].grid(alpha=0.3)
+    axes[0].legend(fontsize=8, ncol=4)
+    axes[-1].set_xlabel("time [s]")
+    figure.savefig(path, dpi=130)
+    plt.close(figure)
+
+
+def _relative_angles(eulers: torch.Tensor) -> torch.Tensor:
+    """Turn absolute euler angles into a continuous trace starting at zero.
+
+    Two things happen here, and both are needed for the answer to mean anything:
+
+    * **Unwrapping.** ``euler_xyz_from_quat`` returns angles in ``(-pi, pi]``, so a hand rolling
+      smoothly through half a turn is reported as jumping from ``+3.14`` to ``-3.14``. Each step's
+      difference is folded back into ``(-pi, pi]`` and re-accumulated, which is what
+      :func:`numpy.unwrap` does, so the trace runs continuously and a rotation of 200 degrees reads
+      as 200 rather than as -160.
+    * **Zeroing.** The first sample is then subtracted from all of them, so every episode starts at
+      0 and what is plotted is how far the hand has turned since it began -- comparable between
+      episodes that started from different reset poses, which the absolute angles are not.
+
+    Args:
+        eulers: Roll, pitch and yaw over one episode [rad]. Shape ``(steps, 3)``.
+
+    Returns:
+        The same angles, unwrapped and offset to start at zero. Shape ``(steps, 3)``.
+    """
+    two_pi = 2.0 * torch.pi
+    steps = eulers[1:] - eulers[:-1]
+    folded = steps - two_pi * torch.round(steps / two_pi)
+    unwrapped = torch.cat([eulers[:1], eulers[:1] + torch.cumsum(folded, dim=0)], dim=0)
+    return unwrapped - unwrapped[:1]
+
+
+def _plot_ee_pose(path, times, positions, eulers, title, reference, highlight=None):
+    """Plot the end-effector's motion away from the pose it started the episode in.
+
+    Args:
+        path: Where to write the PNG.
+        times: Time of each sample [s]. Shape ``(steps,)``.
+        positions: Hand position relative to the episode's first sample [m]. Shape ``(steps, 3)``.
+        eulers: Roll, pitch and yaw relative to that same sample [rad], as returned by
+            :func:`_relative_angles`. Shape ``(steps, 3)``.
+        title: Episode label for the figure.
+        reference: The absolute pose the episode started from -- ``x, y, z`` [m] then roll, pitch
+            and yaw [rad] -- named on the plot so the zeroed traces can still be tied back to a real
+            pose. Shape ``(6,)``.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True, constrained_layout=True)
+    figure.suptitle(f"End-effector pose -- {title}")
+    _shade(axes, highlight)
+
+    for index, name in enumerate("xyz"):
+        axes[0].plot(times, positions[:, index], linewidth=1.2, label=name)
+    axes[0].axhline(0.0, color="0.6", linewidth=0.8)
+    axes[0].set_ylabel("moved since start [m]")
+    axes[0].set_title(
+        f"relative to the point it started at: {reference[0]:.3f}, {reference[1]:.3f},"
+        f" {reference[2]:.3f} m",
+        fontsize=9,
+    )
+    axes[0].legend(fontsize=8, ncol=3)
+    axes[0].grid(alpha=0.3)
+
+    # degrees on the plot, radians in the CSV: the file is for arithmetic and the picture is for
+    # reading, and 90 is easier to recognise on an axis than 1.5708
+    start = torch.rad2deg(reference[3:])
+    for index, name in enumerate(("roll", "pitch", "yaw")):
+        axes[1].plot(times, torch.rad2deg(eulers[:, index]), linewidth=1.2, label=name)
+    axes[1].axhline(0.0, color="0.6", linewidth=0.8)
+    axes[1].set_ylabel("turned since start [deg]")
+    axes[1].set_title(
+        f"relative to the pose it started in: roll {start[0]:.1f}, pitch {start[1]:.1f},"
+        f" yaw {start[2]:.1f} deg",
+        fontsize=9,
+    )
+    axes[1].set_xlabel("time [s]")
+    axes[1].legend(fontsize=8, ncol=3)
+    axes[1].grid(alpha=0.3)
+
+    figure.savefig(path, dpi=130)
+    plt.close(figure)
+
+
+def _plot(path, joint_speeds, ee_speed, names, dt, commanded_cap, highlight=None):
     """Write the three-panel figure. Imported lazily so the sim can run without a display stack."""
     import matplotlib
 
@@ -114,6 +404,8 @@ def _plot(path, joint_speeds, ee_speed, names, dt, commanded_cap):
 
     time_axis = torch.arange(joint_speeds.shape[0]) * dt
     figure, axes = plt.subplots(3, 1, figsize=(11, 12), constrained_layout=True)
+    # only the first two panels are time series; the third is a bar chart over joints
+    _shade(axes[:2], highlight)
 
     axes[0].set_title("Per-joint angular speed (mean over environments)")
     for index, name in enumerate(names):
@@ -153,7 +445,7 @@ def _plot(path, joint_speeds, ee_speed, names, dt, commanded_cap):
     plt.close(figure)
 
 
-def _plot_rewards(path, step_rewards, term_names, episode_ends, end_labels, dt):
+def _plot_rewards(path, step_rewards, term_names, episode_ends, end_labels, dt, highlight=None):
     """Write the reward-term figure.
 
     Args:
@@ -184,6 +476,7 @@ def _plot_rewards(path, step_rewards, term_names, episode_ends, end_labels, dt):
     colors = plt.get_cmap("tab20")(torch.linspace(0, 1, max(len(shown), 1)).numpy())
 
     figure, axes = plt.subplots(3, 1, figsize=(13, 15), constrained_layout=True)
+    _shade(axes[:2], highlight)
 
     axes[0].set_title("Cumulative reward by term (mean over environments)")
     for color, index in zip(colors, shown):
@@ -306,31 +599,235 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         reward_names = list(reward_manager.active_terms)
         done_names = list(termination_manager.active_terms)
 
+        # -- what the per-episode records are taken from.
+        #
+        # One environment, because an episode is a property of an environment: with several running
+        # they start and end at different steps, and a file holding all of them would be a table of
+        # unrelated attempts. ``--env_index`` picks which one.
+        tracked = args_cli.env_index
+        sheet = env.unwrapped.scene["deformable"]
+        marker_cfg = getattr(env.unwrapped.cfg, "edge_marker", None)
+        resolution = getattr(marker_cfg, "resolution", (8, 8))
+        cols, rows = resolution[0] + 1, resolution[1] + 1
+        # the same four nodes ``drape_milestones`` calls the corners, in the same order
+        corner_ids = [0, cols - 1, (rows - 1) * cols, rows * cols - 1]
+
+        out_dir = args_cli.out_dir or os.path.join(os.path.dirname(resume_path), "episodes")
+        os.makedirs(out_dir, exist_ok=True)
+        save_mode = args_cli.save_plots
+        if save_mode == "ask" and not sys.stdin.isatty():
+            print("[INFO]: stdin is not a terminal, so every episode's plots are saved without asking.")
+            save_mode = "all"
+
+        episode_index = 0
+        episode_start = 0
+        first_is_partial = True
+
+        def flush_episode(stop: int, ending: str) -> None:
+            """Write one episode's CSVs, then its plots if they are wanted.
+
+            Args:
+                stop: Index one past the episode's last recorded step.
+                ending: What ended it, for the prompt and the figure titles.
+            """
+            nonlocal episode_index, episode_start, save_mode, first_is_partial
+
+            span = slice(episode_start, stop)
+            length = stop - episode_start
+            episode_start = stop
+            if length < 2:
+                # a single sample is not an episode worth writing; happens when a done lands on the
+                # first recorded step, i.e. the warmup ended right at an episode boundary
+                episode_index += 1
+                first_is_partial = False
+                return
+
+            partial = first_is_partial or ending in ("still running", "step limit")
+            first_is_partial = False
+            label = f"ep{episode_index:02d}" + ("_partial" if partial else "")
+            title = f"{label}, {length} steps, ended by {ending}"
+            times = torch.arange(length) * dt
+
+            corner_track = torch.stack(corners_log[span])
+            pose_track = torch.stack(ee_pose_log[span])
+            roll, pitch, yaw = euler_xyz_from_quat(pose_track[:, 3:7])
+            # The whole 6-D pose is written relative to the episode's first sample, so every episode
+            # starts at (0, 0, 0) and (0, 0, 0) and two of them can be laid over each other whatever
+            # reset poses they happened to be dealt. The angles are unwrapped first, so a roll
+            # through the +/-180 boundary reads as a turn rather than a jump -- see
+            # ``_relative_angles``. The absolute start is kept in ``reference`` and reported.
+            eulers = _relative_angles(torch.stack([roll, pitch, yaw], dim=-1))
+            positions = pose_track[:, :3] - pose_track[:1, :3]
+            reference = torch.cat([pose_track[0, :3], torch.stack([roll[0], pitch[0], yaw[0]])])
+
+            # the interval every figure washes over: the sheet in the gripper, on its way out of the
+            # slot. Shared by all four so the same moment lines up across them.
+            highlight = _grasp_span(
+                times, torch.stack(holding_log[span]), torch.stack(extracted_log[span])
+            )
+
+            corners_csv = os.path.join(out_dir, f"{label}_corners.csv")
+            _write_csv(
+                corners_csv,
+                ["step", "time_s"]
+                + [f"corner{c}_{axis}" for c in range(4) for axis in "xyz"],
+                (
+                    [step, round(float(times[step]), 6)]
+                    + [round(float(value), 6) for value in corner_track[step].flatten()]
+                    for step in range(length)
+                ),
+            )
+            pose_csv = os.path.join(out_dir, f"{label}_ee_pose.csv")
+            _write_csv(
+                pose_csv,
+                ["step", "time_s", "x", "y", "z", "roll_rad", "pitch_rad", "yaw_rad"],
+                (
+                    [step, round(float(times[step]), 6)]
+                    + [round(float(value), 6) for value in positions[step]]
+                    + [round(float(value), 6) for value in eulers[step]]
+                    for step in range(length)
+                ),
+            )
+            span_note = (
+                f"{highlight[2]}: {highlight[0]:.2f} to {highlight[1]:.2f} s"
+                if highlight is not None
+                else "no grasp to highlight"
+            )
+            start_deg = torch.rad2deg(reference[3:])
+            print(
+                f"[INFO]: wrote {corners_csv} and {pose_csv}\n"
+                f"        the pose is relative to the one the episode started in:"
+                f" {reference[0]:.3f}, {reference[1]:.3f}, {reference[2]:.3f} m and"
+                f" roll {start_deg[0]:.1f}, pitch {start_deg[1]:.1f}, yaw {start_deg[2]:.1f} deg\n"
+                f"        {span_note}"
+            )
+
+            wanted, save_mode = _ask_save(
+                f"\n[{label}] {length} steps, ended by {ending}, {span_note}.", save_mode
+            )
+            episode_index += 1
+            if not wanted:
+                return
+
+            _plot_corners(
+                os.path.join(out_dir, f"{label}_corners.png"), times, corner_track, title, highlight
+            )
+            _plot_ee_pose(
+                os.path.join(out_dir, f"{label}_ee_pose.png"),
+                times,
+                positions,
+                eulers,
+                title,
+                reference,
+                highlight,
+            )
+            _plot(
+                os.path.join(out_dir, f"{label}_joint_speed.png"),
+                torch.stack(joint_speeds[span])[:, tracked : tracked + 1].cpu(),
+                torch.stack(ee_speeds[span])[:, tracked : tracked + 1].cpu(),
+                arm_names,
+                dt,
+                cap,
+                highlight,
+            )
+            written = 3
+            if not args_cli.no_rewards:
+                _plot_rewards(
+                    os.path.join(out_dir, f"{label}_rewards.png"),
+                    torch.stack(step_rewards[span])[:, tracked : tracked + 1].cpu(),
+                    reward_names,
+                    [],
+                    [],
+                    dt,
+                    highlight,
+                )
+                written += 1
+            print(f"[INFO]: wrote {written} plots for {label} in {out_dir}")
+
         joint_speeds, ee_speeds = [], []
         step_rewards, term_dones = [], []
+        corners_log, ee_pose_log = [], []
+        holding_log, extracted_log = [], []
         previous_hand = None
         obs = env.get_observations()
-        with torch.inference_mode():
-            for step in range(args_cli.warmup + args_cli.steps):
-                obs, _, dones, _ = env.step(policy(obs))
-                policy.reset(dones)
-                hand = robot.data.body_link_pose_w.torch[:, hand_id, :3].clone()
-                if step >= args_cli.warmup:
-                    joint_speeds.append(robot.data.joint_vel.torch[:, arm_ids].abs().clone())
-                    # finite-differenced rather than read off a velocity buffer, so it means the
-                    # same thing whichever physics backend produced it
-                    if previous_hand is not None:
-                        ee_speeds.append(((hand - previous_hand).norm(dim=-1) / dt).clone())
-                    if not args_cli.no_rewards:
-                        # the manager stores each term as a *rate*; multiplying by dt undoes that
-                        # and gives what the term actually added to the return this step, so the
-                        # columns sum to the return rather than to 30 times it
-                        step_rewards.append(reward_manager._step_reward.clone() * dt)
-                        term_dones.append(termination_manager._term_dones.clone())
-                previous_hand = hand
+        # Episodes keep coming until Ctrl-C: each one runs to its own ending or to ``--steps``,
+        # whichever comes first, and is then written, asked about, and followed by a fresh one.
+        # There is no total budget -- stopping is the operator's call, not the script's.
+        print(
+            f"[INFO]: recording episodes of up to {args_cli.steps} steps each."
+            " Press Ctrl-C to stop after the one in progress."
+        )
+        interrupted = False
+        try:
+            with torch.inference_mode():
+                for step in itertools.count():
+                    obs, _, dones, _ = env.step(policy(obs))
+                    policy.reset(dones)
+                    hand = robot.data.body_link_pose_w.torch[:, hand_id, :3].clone()
+                    if step >= args_cli.warmup:
+                        joint_speeds.append(robot.data.joint_vel.torch[:, arm_ids].abs().clone())
+                        # finite-differenced rather than read off a velocity buffer, so it means the
+                        # same thing whichever physics backend produced it. Zero on the first sample,
+                        # which has no predecessor, so the trace stays aligned with everything else.
+                        ee_speeds.append(
+                            ((hand - previous_hand).norm(dim=-1) / dt).clone()
+                            if previous_hand is not None
+                            else torch.zeros(env.unwrapped.num_envs, device=hand.device)
+                        )
+                        # the tracked environment's own record, kept per step and cut into episodes below
+                        corners_log.append(sheet.data.nodal_pos_w.torch[tracked, corner_ids].clone().cpu())
+                        ee_pose_log.append(robot.data.body_link_pose_w.torch[tracked, hand_id].clone().cpu())
+                        # the grasp state machine's own flags, for the highlighted interval. ``holding``
+                        # is absent for one step if the reward term has not run yet, which reads as
+                        # "not holding" and is right.
+                        debug = grasp_debug(env.unwrapped)
+                        holding = debug.get("holding")
+                        holding_log.append(
+                            holding[tracked].clone().cpu()
+                            if holding is not None
+                            else torch.zeros((), dtype=torch.bool)
+                        )
+                        extracted_log.append(sheet_extracted(env.unwrapped)[tracked].clone().cpu())
+                        if not args_cli.no_rewards:
+                            # the manager stores each term as a *rate*; multiplying by dt undoes
+                            # that and gives what the term actually added to the return this step,
+                            # so the columns sum to the return rather than to 30 times it
+                            step_rewards.append(reward_manager._step_reward.clone() * dt)
+                            term_dones.append(termination_manager._term_dones.clone())
+                        fired = termination_manager._term_dones[tracked].nonzero(as_tuple=True)[0]
+                        if len(fired):
+                            # The episode ends *inside* this step: the environment has already been
+                            # reset by the time ``step`` returns, so everything sampled above
+                            # describes the fresh episode, not the one that just finished. The
+                            # boundary therefore excludes this sample, and the next episode starts
+                            # on it -- no reset is needed here, the environment has done it.
+                            flush_episode(
+                                len(corners_log) - 1, "+".join(done_names[i] for i in fired.tolist())
+                            )
+                        elif len(corners_log) - episode_start >= args_cli.steps:
+                            # Long enough. Nothing ended it, so the environment is still mid-episode
+                            # and has to be sent back to the start explicitly, or the next record
+                            # would carry straight on from a sheet already halfway draped.
+                            flush_episode(len(corners_log), "step limit")
+                            env.reset()
+                            obs = env.get_observations()
+                            previous_hand = None
+                            continue
+                    previous_hand = hand
+
+        except KeyboardInterrupt:
+            # Wherever it lands -- mid-step, mid-plot, or at the prompt -- Ctrl-C ends the run
+            # and leaves the episode in progress unwritten, which is what declining to answer
+            # means.
+            interrupted = True
+        if interrupted:
+            print("\n[INFO]: stopped. Anything recorded since the last episode was written is dropped.")
 
         joint_speeds = torch.stack(joint_speeds).cpu()
         ee_speeds = torch.stack(ee_speeds).cpu()
+        if step_rewards:
+            step_rewards = torch.stack(step_rewards).cpu()
+            term_dones = torch.stack(term_dones).cpu()
 
         print(f"\n{'joint':>16} {'median':>9} {'p95':>9} {'max':>9} {'max/limit':>10}")
         for name, median, p95, peak, fraction in _summarize(joint_speeds, arm_names, FRANKA_JOINT_VEL_LIMITS):
@@ -341,18 +838,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             worst = joint_speeds.max().item()
             print(f"\nfastest joint reached {worst:.3f} rad/s = {worst / cap:.0%} of the {cap:.3f} rad/s cap")
 
-        out = args_cli.out or os.path.join(os.path.dirname(resume_path), "joint_speed.png")
-        _plot(out, joint_speeds, ee_speeds, arm_names, dt, cap)
-        print(f"[INFO]: wrote {out}")
+        if args_cli.rollout_plots:
+            out = args_cli.out or os.path.join(os.path.dirname(resume_path), "joint_speed.png")
+            _plot(out, joint_speeds, ee_speeds, arm_names, dt, cap)
+            print(f"[INFO]: wrote {out}")
 
         if not args_cli.no_rewards:
-            step_rewards = torch.stack(step_rewards).cpu()
-            term_dones = torch.stack(term_dones).cpu()
-
-            # which term ended each episode. Taken from environment 0: with several environments
-            # the endings interleave and a single timeline cannot honestly label them all.
+            # which term ended each episode. Taken from the tracked environment: with several
+            # environments the endings interleave and a single timeline cannot honestly label them.
             ends, labels = [], []
-            for step_index, row in enumerate(term_dones[:, 0, :]):
+            for step_index, row in enumerate(term_dones[:, tracked, :]):
                 fired = row.nonzero(as_tuple=True)[0]
                 if len(fired):
                     ends.append(step_index)
@@ -371,11 +866,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 )
             net = totals.sum().item()
             print(f"{'NET':>22} {net:>12,.1f} {net / episodes:>12,.1f} {net / len(step_rewards):>10,.2f}")
-            print(f"\n{len(ends)} episode(s) ended in env 0: {', '.join(labels) if labels else 'none'}")
+            print(
+                f"\n{len(ends)} episode(s) ended in env {tracked}:"
+                f" {', '.join(labels) if labels else 'none'}"
+            )
 
-            reward_out = args_cli.reward_out or os.path.join(os.path.dirname(resume_path), "reward_terms.png")
-            _plot_rewards(reward_out, step_rewards, reward_names, ends, labels, dt)
-            print(f"[INFO]: wrote {reward_out}")
+            if args_cli.rollout_plots:
+                reward_out = args_cli.reward_out or os.path.join(
+                    os.path.dirname(resume_path), "reward_terms.png"
+                )
+                _plot_rewards(reward_out, step_rewards, reward_names, ends, labels, dt)
+                print(f"[INFO]: wrote {reward_out}")
 
         env.close()
 

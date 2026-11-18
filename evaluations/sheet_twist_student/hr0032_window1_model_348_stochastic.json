@@ -1,0 +1,15 @@
+{
+  "student": "logs/rsl_rl/sheet_platform_twist/hr0032_window1/model_348.pt",
+  "edge": "right",
+  "result": {
+    "held": 1.0,
+    "extracted": 0.9923664122137404,
+    "released": 0.9389312977099237,
+    "early_end": 0.22137404580152673,
+    "best_released_coverage": 0.21755725190839695,
+    "final_coverage": 0.18702290076335878,
+    "return": 5309.368554501133,
+    "episodes": 131,
+    "best_released_coverage_sem": 0.021883824765957877
+  }
+}

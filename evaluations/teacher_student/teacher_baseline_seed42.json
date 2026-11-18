@@ -1,0 +1,42 @@
+{
+  "task": "Template-Sheet-Rl-Platform-TwistStudent-v0",
+  "teacher": "logs/rsl_rl/sheet_platform_twist/best_deformable_twist/model_2874.pt",
+  "student": null,
+  "num_envs": 256,
+  "episodes_per_env": 2,
+  "seed": 42,
+  "results": {
+    "teacher_det": {
+      "episodes": 512,
+      "success": 0.87109375,
+      "dropped": 0.08203125,
+      "held_too_low": 0.044921875,
+      "time_out": 0.0,
+      "other": 0.001953125,
+      "extracted": 0.994140625,
+      "return": 1870.3579944449011,
+      "length": 92.77734375,
+      "cov_best": 0.7552413940429688,
+      "cov_best_released": 0.0,
+      "cov_final": 0.7347640991210938,
+      "release_angle_min": 9.007433460102424,
+      "wall_time_s": 23.080965280532837
+    },
+    "teacher_stoch": {
+      "episodes": 512,
+      "success": 0.73828125,
+      "dropped": 0.171875,
+      "held_too_low": 0.0859375,
+      "time_out": 0.0,
+      "other": 0.00390625,
+      "extracted": 0.982421875,
+      "return": 1693.971556307748,
+      "length": 98.85546875,
+      "cov_best": 0.7330780029296875,
+      "cov_best_released": 0.0,
+      "cov_final": 0.7090911865234375,
+      "release_angle_min": 12.280947056785227,
+      "wall_time_s": 97.1558301448822
+    }
+  }
+}

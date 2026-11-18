@@ -175,6 +175,20 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
         # visualiser callback so the region is shown whether or not debug_vis is enabled.
         arm_pos_w = self.arm.data.root_pos_w.torch
         arm_quat_w = self.arm.data.root_quat_w.torch
+
+        if self.cfg.band_follows_goal:
+            # Draw the sleeve *on* the goal instead of on the arm's own band offset -- same point,
+            # same frame and same tensor the goal is published from, so the two cannot disagree.
+            # The centre-line correction is skipped deliberately: it exists to slide the sleeve onto
+            # the limb, and sliding it anywhere at all would move it off the point it is here to mark.
+            goal_quat_w = self.arm_task_quat_w()
+            self.band_visualizer.visualize(
+                translations=arm_pos_w + quat_apply(goal_quat_w, self.goal_offset_b),
+                orientations=quat_mul(goal_quat_w, self._band_align_quat),
+                scales=self._band_scales(),
+            )
+            return
+
         band_offset_b = self.band_offset_b
         if self._centerline_x is not None:
             # slide the sleeve sideways onto the limb's real centre line. Only the marker moves --
@@ -185,20 +199,25 @@ class ArmDrapePoseCommand(DeformableUniformPoseCommand):
         band_pos_w = arm_pos_w + quat_apply(arm_quat_w, band_offset_b)
         band_quat_w = quat_mul(arm_quat_w, self._band_align_quat)
 
-        # Track a randomised arm thickness, so the sleeve keeps hugging the surface instead of being
-        # swallowed by a fattened arm or left hanging off a thinned one. Radial only: the marker's
-        # local z was rotated onto the arm's axis above and carries the band's width, which is a
-        # task constant and must not scale with the limb.
-        scales = None
-        if self.cfg.arm_nominal_radius is not None:
-            radius = resolve_arm_radius(self._env, self.cfg.arm_nominal_radius)
-            if isinstance(radius, torch.Tensor):
-                ratio = (radius / self.cfg.arm_nominal_radius).unsqueeze(-1)
-                scales = torch.cat([ratio, ratio, torch.ones_like(ratio)], dim=-1)
-
         self.band_visualizer.visualize(
-            translations=band_pos_w, orientations=band_quat_w, scales=scales
+            translations=band_pos_w, orientations=band_quat_w, scales=self._band_scales()
         )
+
+    def _band_scales(self) -> torch.Tensor | None:
+        """Per-environment radial scale for the sleeve, or ``None`` to leave it at its authored size.
+
+        Tracks a randomised arm thickness, so the sleeve keeps hugging the surface instead of being
+        swallowed by a fattened arm or left hanging off a thinned one. Radial only: the marker's
+        local z is rotated onto the arm's axis and carries the band's width, which is a task constant
+        and must not scale with the limb.
+        """
+        if self.cfg.arm_nominal_radius is None:
+            return None
+        radius = resolve_arm_radius(self._env, self.cfg.arm_nominal_radius)
+        if not isinstance(radius, torch.Tensor):
+            return None
+        ratio = (radius / self.cfg.arm_nominal_radius).unsqueeze(-1)
+        return torch.cat([ratio, ratio, torch.ones_like(ratio)], dim=-1)
 
 
 @configclass
@@ -265,6 +284,25 @@ class ArmDrapePoseCommandCfg(DeformableUniformPoseCommandCfg):
     Purely visual -- no rigid or collision properties -- so the sheet drapes over the arm itself
     and the band never perturbs the physics. Keep the radius a millimetre or so above the arm's so
     it reads as paint; :attr:`height` is the region's extent along the arm.
+    """
+
+    band_follows_goal: bool = False
+    """Draw the sleeve centred on the goal point rather than on the arm's band offset.
+
+    ``False`` -- the default -- keeps the sleeve where it has always been: on the arm's axis at the
+    band's station, which is the region :func:`_band_frame` scores and, in the base task, sits
+    directly under the goal because the only difference between the two is the goal's lift.
+
+    ``True`` centres it on the published goal instead, so what is drawn is exactly the point the
+    policy is given, to the millimetre. Use it where the two have come apart -- an arm declaring
+    :attr:`arm_mount_quat` builds its goal in the task frame while the band is built from the body's
+    pose, and the two are only the same thing when the mounting rotation happens to leave the band
+    offset alone.
+
+    It marks the goal, and nothing promises the goal is on the limb: where the frames disagree, the
+    sleeve now shows that disagreement instead of hiding it. :attr:`band_centerline_offsets` is
+    ignored while this is set, since sliding the sleeve onto the limb's curve would move it off the
+    very point it is being asked to mark.
     """
 
     band_centerline_offsets: tuple[tuple[float, float, float], ...] | None = None

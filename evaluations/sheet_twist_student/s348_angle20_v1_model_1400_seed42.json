@@ -1,0 +1,19 @@
+{
+  "student": "logs/rsl_rl/sheet_platform_twist/s348_angle20_v1/model_1400.pt",
+  "edge": "far",
+  "task": "Template-Sheet-Rl-Platform-TwistStudent-v0",
+  "seed": 42,
+  "stochastic": false,
+  "result": {
+    "held": 1.0,
+    "extracted": 1.0,
+    "released": 0.0,
+    "early_end": 1.0,
+    "success": 0.7,
+    "best_released_coverage": 0.0,
+    "final_coverage": 0.673046875,
+    "return": 892.977734375,
+    "episodes": 10,
+    "best_released_coverage_sem": 0.0
+  }
+}

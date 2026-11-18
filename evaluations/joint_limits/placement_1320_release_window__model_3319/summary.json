@@ -1,0 +1,320 @@
+{
+  "episodes": [
+    {
+      "env": 0,
+      "episode": 0,
+      "seconds": 7.958,
+      "ended_by": [
+        "held_too_long"
+      ],
+      "violated": true,
+      "metrics": {
+        "position": {
+          "unit": "rad",
+          "samples": 956,
+          "max_abs": {
+            "panda_joint1": 2.897900104522705,
+            "panda_joint2": 0.5238000154495239,
+            "panda_joint3": 2.655900001525879,
+            "panda_joint4": 2.8324999809265137,
+            "panda_joint5": 0.3149999976158142,
+            "panda_joint6": 3.184299945831299,
+            "panda_joint7": 2.620300054550171
+          },
+          "p99_abs": {
+            "panda_joint1": 2.8975000381469727,
+            "panda_joint2": 0.5206000208854675,
+            "panda_joint3": 2.6531999111175537,
+            "panda_joint4": 2.830199956893921,
+            "panda_joint5": 0.313400000333786,
+            "panda_joint6": 3.180500030517578,
+            "panda_joint7": 2.581399917602539
+          },
+          "max_fraction_of_limit": {
+            "panda_joint1": 1.0,
+            "panda_joint2": 0.297,
+            "panda_joint3": 0.917,
+            "panda_joint4": 0.841,
+            "panda_joint5": 0.109,
+            "panda_joint6": 0.699,
+            "panda_joint7": 0.904
+          },
+          "p99_fraction_of_limit": {
+            "panda_joint1": 1.0,
+            "panda_joint2": 0.295,
+            "panda_joint3": 0.916,
+            "panda_joint4": 0.839,
+            "panda_joint5": 0.108,
+            "panda_joint6": 0.697,
+            "panda_joint7": 0.891
+          },
+          "samples_over_limit": {
+            "panda_joint1": 30,
+            "panda_joint2": 0,
+            "panda_joint3": 0,
+            "panda_joint4": 0,
+            "panda_joint5": 0,
+            "panda_joint6": 0,
+            "panda_joint7": 0
+          },
+          "violated": true
+        },
+        "velocity": {
+          "unit": "rad/s",
+          "samples": 956,
+          "max_abs": {
+            "panda_joint1": 1.457900047302246,
+            "panda_joint2": 0.9136999845504761,
+            "panda_joint3": 1.4079999923706055,
+            "panda_joint4": 0.810699999332428,
+            "panda_joint5": 0.6962000131607056,
+            "panda_joint6": 0.8895000219345093,
+            "panda_joint7": 0.5004000067710876
+          },
+          "p99_abs": {
+            "panda_joint1": 1.451799988746643,
+            "panda_joint2": 0.8690000176429749,
+            "panda_joint3": 1.389799952507019,
+            "panda_joint4": 0.7615000009536743,
+            "panda_joint5": 0.6711000204086304,
+            "panda_joint6": 0.8776999711990356,
+            "panda_joint7": 0.4986000061035156
+          },
+          "max_fraction_of_limit": {
+            "panda_joint1": 0.67,
+            "panda_joint2": 0.42,
+            "panda_joint3": 0.647,
+            "panda_joint4": 0.373,
+            "panda_joint5": 0.267,
+            "panda_joint6": 0.341,
+            "panda_joint7": 0.192
+          },
+          "p99_fraction_of_limit": {
+            "panda_joint1": 0.667,
+            "panda_joint2": 0.4,
+            "panda_joint3": 0.639,
+            "panda_joint4": 0.35,
+            "panda_joint5": 0.257,
+            "panda_joint6": 0.336,
+            "panda_joint7": 0.191
+          },
+          "samples_over_limit": {
+            "panda_joint1": 0,
+            "panda_joint2": 0,
+            "panda_joint3": 0,
+            "panda_joint4": 0,
+            "panda_joint5": 0,
+            "panda_joint6": 0,
+            "panda_joint7": 0
+          },
+          "violated": false
+        },
+        "acceleration": {
+          "unit": "rad/s\u00b2",
+          "samples": 953,
+          "max_abs": {
+            "panda_joint1": 33.80830001831055,
+            "panda_joint2": 8.871199607849121,
+            "panda_joint3": 19.85140037536621,
+            "panda_joint4": 5.979000091552734,
+            "panda_joint5": 4.5954999923706055,
+            "panda_joint6": 7.003699779510498,
+            "panda_joint7": 3.822499990463257
+          },
+          "p99_abs": {
+            "panda_joint1": 5.0742998123168945,
+            "panda_joint2": 6.130000114440918,
+            "panda_joint3": 5.01170015335083,
+            "panda_joint4": 4.667799949645996,
+            "panda_joint5": 3.9144999980926514,
+            "panda_joint6": 6.170599937438965,
+            "panda_joint7": 3.303999900817871
+          },
+          "max_fraction_of_limit": {
+            "panda_joint1": 2.254,
+            "panda_joint2": 1.183,
+            "panda_joint3": 1.985,
+            "panda_joint4": 0.478,
+            "panda_joint5": 0.306,
+            "panda_joint6": 0.35,
+            "panda_joint7": 0.191
+          },
+          "p99_fraction_of_limit": {
+            "panda_joint1": 0.338,
+            "panda_joint2": 0.817,
+            "panda_joint3": 0.501,
+            "panda_joint4": 0.373,
+            "panda_joint5": 0.261,
+            "panda_joint6": 0.309,
+            "panda_joint7": 0.165
+          },
+          "samples_over_limit": {
+            "panda_joint1": 1,
+            "panda_joint2": 7,
+            "panda_joint3": 1,
+            "panda_joint4": 0,
+            "panda_joint5": 0,
+            "panda_joint6": 0,
+            "panda_joint7": 0
+          },
+          "violated": true
+        },
+        "jerk": {
+          "unit": "rad/s\u00b3",
+          "samples": 952,
+          "max_abs": {
+            "panda_joint1": 4000.468505859375,
+            "panda_joint2": 197.19720458984375,
+            "panda_joint3": 2874.08544921875,
+            "panda_joint4": 496.69158935546875,
+            "panda_joint5": 501.9685974121094,
+            "panda_joint6": 541.3005981445312,
+            "panda_joint7": 129.60560607910156
+          },
+          "p99_abs": {
+            "panda_joint1": 119.65799713134766,
+            "panda_joint2": 123.63899993896484,
+            "panda_joint3": 168.67860412597656,
+            "panda_joint4": 167.85159301757812,
+            "panda_joint5": 126.60399627685547,
+            "panda_joint6": 163.0012969970703,
+            "panda_joint7": 49.47050094604492
+          },
+          "max_fraction_of_limit": {
+            "panda_joint1": 0.533,
+            "panda_joint2": 0.053,
+            "panda_joint3": 0.575,
+            "panda_joint4": 0.079,
+            "panda_joint5": 0.067,
+            "panda_joint6": 0.054,
+            "panda_joint7": 0.013
+          },
+          "p99_fraction_of_limit": {
+            "panda_joint1": 0.016,
+            "panda_joint2": 0.033,
+            "panda_joint3": 0.034,
+            "panda_joint4": 0.027,
+            "panda_joint5": 0.017,
+            "panda_joint6": 0.016,
+            "panda_joint7": 0.005
+          },
+          "samples_over_limit": {
+            "panda_joint1": 0,
+            "panda_joint2": 0,
+            "panda_joint3": 0,
+            "panda_joint4": 0,
+            "panda_joint5": 0,
+            "panda_joint6": 0,
+            "panda_joint7": 0
+          },
+          "violated": false
+        }
+      }
+    }
+  ],
+  "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/placement_1320_release_window/model_3319.pt",
+  "task": "Template-Sheet-Rl-Platform-v0",
+  "margin": 1.0,
+  "limits": {
+    "position_min": [
+      -2.8973,
+      -1.7628,
+      -2.8973,
+      -3.0718,
+      -2.8973,
+      -0.0175,
+      -2.8973
+    ],
+    "position_max": [
+      2.8973,
+      1.7628,
+      2.8973,
+      -0.0698,
+      2.8973,
+      3.7525,
+      2.8973
+    ],
+    "velocity": [
+      2.175,
+      2.175,
+      2.175,
+      2.175,
+      2.61,
+      2.61,
+      2.61
+    ],
+    "acceleration": [
+      15.0,
+      7.5,
+      10.0,
+      12.5,
+      15.0,
+      20.0,
+      20.0
+    ],
+    "jerk": [
+      7500.0,
+      3750.0,
+      5000.0,
+      6250.0,
+      7500.0,
+      10000.0,
+      10000.0
+    ]
+  },
+  "sample_dt": 0.008333333333333333,
+  "joint_names": [
+    "panda_joint1",
+    "panda_joint2",
+    "panda_joint3",
+    "panda_joint4",
+    "panda_joint5",
+    "panda_joint6",
+    "panda_joint7"
+  ],
+  "worst_fraction_of_limit": {
+    "position": {
+      "panda_joint1": 1.0,
+      "panda_joint2": 0.297,
+      "panda_joint3": 0.917,
+      "panda_joint4": 0.841,
+      "panda_joint5": 0.109,
+      "panda_joint6": 0.699,
+      "panda_joint7": 0.904
+    },
+    "velocity": {
+      "panda_joint1": 0.67,
+      "panda_joint2": 0.42,
+      "panda_joint3": 0.647,
+      "panda_joint4": 0.373,
+      "panda_joint5": 0.267,
+      "panda_joint6": 0.341,
+      "panda_joint7": 0.192
+    },
+    "acceleration": {
+      "panda_joint1": 2.254,
+      "panda_joint2": 1.183,
+      "panda_joint3": 1.985,
+      "panda_joint4": 0.478,
+      "panda_joint5": 0.306,
+      "panda_joint6": 0.35,
+      "panda_joint7": 0.191
+    },
+    "jerk": {
+      "panda_joint1": 0.533,
+      "panda_joint2": 0.053,
+      "panda_joint3": 0.575,
+      "panda_joint4": 0.079,
+      "panda_joint5": 0.067,
+      "panda_joint6": 0.054,
+      "panda_joint7": 0.013
+    }
+  },
+  "violated": {
+    "position": true,
+    "velocity": false,
+    "acceleration": true,
+    "jerk": false
+  },
+  "passed": false
+}

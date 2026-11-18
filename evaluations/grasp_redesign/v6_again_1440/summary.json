@@ -1,0 +1,60 @@
+{
+  "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/2026-09-24_13-22-48_grasp_v6_again/model_1440.pt",
+  "seed": 42,
+  "dt": 0.03333333333333333,
+  "episodes": [
+    {
+      "env": 0,
+      "episode": 0,
+      "success": false,
+      "steps": 500,
+      "return": 38.14518737792969
+    },
+    {
+      "env": 0,
+      "episode": 1,
+      "success": true,
+      "steps": 155,
+      "return": 360.13330078125
+    }
+  ],
+  "success_rate": 0.5,
+  "joint_velocity_p95": 0.463385671377182,
+  "joint_acceleration_p95": 1.5021041631698608,
+  "joint_acceleration_max": 6.993435859680176,
+  "joint_jerk_p95": 30.663936614990234,
+  "first_hold_linear_speed_median": 0.06284171342849731,
+  "mean_episode_seconds": 10.916666666666666,
+  "completed_episodes": 2,
+  "motion_component_names": [
+    "speed",
+    "angular",
+    "hand_acc",
+    "joint_acc",
+    "jerk",
+    "command",
+    "closure"
+  ],
+  "reward_names": [
+    "table_clearance",
+    "ee_speed",
+    "grasp_stage",
+    "grasp_progress",
+    "motion_cost"
+  ],
+  "termination_names": [
+    "time_out",
+    "deformable_out_of_bounds",
+    "ee_below_table",
+    "joint_vel_out_of_limit",
+    "finger_touched_slot",
+    "extracted"
+  ],
+  "reward_mean_per_episode": {
+    "table_clearance": 0.0,
+    "ee_speed": 0.0,
+    "grasp_stage": 109.75001525878906,
+    "grasp_progress": 90.76152038574219,
+    "motion_cost": -1.3722972869873047
+  }
+}

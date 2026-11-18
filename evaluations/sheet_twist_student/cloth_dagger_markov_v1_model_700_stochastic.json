@@ -1,0 +1,15 @@
+{
+  "student": "logs/rsl_rl/sheet_platform_twist/cloth_dagger_markov_v1/model_700.pt",
+  "edge": "right",
+  "result": {
+    "held": 0.9921875,
+    "extracted": 0.5234375,
+    "released": 0.3125,
+    "early_end": 0.015625,
+    "best_released_coverage": 0.10980224609375,
+    "final_coverage": 0.118255615234375,
+    "return": 185.39971543801948,
+    "episodes": 128,
+    "best_released_coverage_sem": 0.02202045984350977
+  }
+}

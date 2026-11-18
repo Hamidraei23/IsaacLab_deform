@@ -1,0 +1,15 @@
+{
+  "student": "logs/rsl_rl/sheet_platform_twist/cloth_dagger_long_v1/model_1100.pt",
+  "edge": "right",
+  "result": {
+    "held": 1.0,
+    "extracted": 0.625,
+    "released": 0.0,
+    "early_end": 0.0,
+    "best_released_coverage": 0.0,
+    "final_coverage": 0.06396484375,
+    "return": 440.84605598449707,
+    "episodes": 8,
+    "best_released_coverage_sem": 0.0
+  }
+}

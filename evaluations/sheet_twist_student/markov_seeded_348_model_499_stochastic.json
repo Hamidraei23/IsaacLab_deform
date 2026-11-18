@@ -1,0 +1,15 @@
+{
+  "student": "logs/rsl_rl/sheet_platform_twist/markov_seeded_348/model_499.pt",
+  "edge": "right",
+  "result": {
+    "held": 1.0,
+    "extracted": 0.78125,
+    "released": 0.4375,
+    "early_end": 0.0,
+    "best_released_coverage": 0.13739013671875,
+    "final_coverage": 0.244720458984375,
+    "return": 353.796740680933,
+    "episodes": 128,
+    "best_released_coverage_sem": 0.022600839170674843
+  }
+}

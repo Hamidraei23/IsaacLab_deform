@@ -1,0 +1,63 @@
+{
+  "task": "Template-Sheet-Rl-Platform-TwistStudent-UR16e-v0",
+  "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_twist_ur10e_ppo/best_twist_velterm_1924/model_1924.pt",
+  "seed": 42,
+  "num_envs": 1,
+  "observation_shape": [
+    1,
+    59
+  ],
+  "action_shape": [
+    1,
+    7
+  ],
+  "grasped": [
+    true
+  ],
+  "extracted": [
+    true
+  ],
+  "endings": [
+    [
+      "placed"
+    ]
+  ],
+  "returns": [
+    7175.62646484375
+  ],
+  "steps": [
+    67
+  ],
+  "successes": 1,
+  "max_adapter_position_error_m": 0.0020484793931245804,
+  "max_adapter_orientation_error_rad": 0.00046852740342728794,
+  "max_ur_fk_vs_sim_position_error_m": 2.739798503625934e-07,
+  "max_joint_speed": {
+    "shoulder_pan_joint": 1.0024915933609009,
+    "shoulder_lift_joint": 1.68499755859375,
+    "elbow_joint": 2.030383348464966,
+    "wrist_1_joint": 2.685426950454712,
+    "wrist_2_joint": 1.3483723402023315,
+    "wrist_3_joint": 1.8447580337524414,
+    "finger_joint": 10.513047218322754,
+    "left_inner_finger_joint": 8.740108489990234,
+    "left_inner_finger_knuckle_joint": 10.59667682647705,
+    "right_outer_knuckle_joint": 7.143350124359131,
+    "right_inner_finger_joint": 11.077447891235352,
+    "right_inner_finger_knuckle_joint": 10.71441650390625
+  },
+  "step_dt": 0.02,
+  "peak_joint_speed_fraction": [
+    0.854797899723053
+  ],
+  "peak_tool_speed": [
+    1.3245171308517456
+  ],
+  "mean_tool_speed": [
+    0.5729594230651855
+  ],
+  "tool_speed_threshold": 0.4,
+  "time_over_tool_speed_threshold": [
+    0.8799999952316284
+  ]
+}

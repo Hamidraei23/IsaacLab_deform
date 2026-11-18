@@ -1,0 +1,42 @@
+{
+  "teacher": "logs/rsl_rl/lift_cube_franka_twist/twist_pick_place_v4/model_5900.pt",
+  "best": "near",
+  "edges": {
+    "near": {
+      "held": 0.0,
+      "extracted": 0.0,
+      "released": 0.0,
+      "early_end": 0.0,
+      "best_released_coverage": 0.0,
+      "final_coverage": 0.0,
+      "episodes": 2
+    },
+    "far": {
+      "held": 0.0,
+      "extracted": 0.0,
+      "released": 0.0,
+      "early_end": 0.0,
+      "best_released_coverage": 0.0,
+      "final_coverage": 0.0,
+      "episodes": 2
+    },
+    "left": {
+      "held": 0.0,
+      "extracted": 0.0,
+      "released": 0.0,
+      "early_end": 0.0,
+      "best_released_coverage": 0.0,
+      "final_coverage": 0.0,
+      "episodes": 2
+    },
+    "right": {
+      "held": 0.0,
+      "extracted": 0.0,
+      "released": 0.0,
+      "early_end": 0.0,
+      "best_released_coverage": 0.0,
+      "final_coverage": 0.0,
+      "episodes": 2
+    }
+  }
+}

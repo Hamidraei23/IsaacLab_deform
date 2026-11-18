@@ -26,6 +26,20 @@ gym.register(
     },
 )
 
+for task_id, env_cfg, agent_cfg in (
+    ("Template-Sheet-Rl-Platform-v0", "SheetRlPlatformEnvCfg", "PlatformPPORunnerCfg"),
+    ("Template-Sheet-Rl-Platform-Grasp-v0", "SheetRlPlatformGraspEnvCfg", "PlatformGraspPPORunnerCfg"),
+):
+    gym.register(
+        id=task_id,
+        entry_point=f"{__name__}.sheet_rl_env:PushableSheetEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.sheet_rl_platform_env_cfg:{env_cfg}",
+            "rsl_rl_cfg_entry_point": f"{agents.__name__}.platform_ppo_cfg:{agent_cfg}",
+        },
+    )
+
 # the same task with a cosmetic mannequin hand on a random end of the arm. A separate id so the
 # base task -- and any training running against it -- is untouched by hand experiments.
 #

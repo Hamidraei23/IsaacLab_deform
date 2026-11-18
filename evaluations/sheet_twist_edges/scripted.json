@@ -1,0 +1,55 @@
+{
+  "expert": "scripted",
+  "teacher": "None",
+  "best": "near",
+  "edges": {
+    "near": {
+      "held": 1.0,
+      "extracted": 1.0,
+      "released": 1.0,
+      "early_end": 1.0,
+      "success": 1.0,
+      "best_released_coverage": 0.0,
+      "final_coverage": 0.8828125,
+      "return": 4331.4703125,
+      "episodes": 10,
+      "best_released_coverage_sem": 0.0
+    },
+    "far": {
+      "held": 1.0,
+      "extracted": 1.0,
+      "released": 1.0,
+      "early_end": 1.0,
+      "success": 0.9,
+      "best_released_coverage": 0.0,
+      "final_coverage": 0.808203125,
+      "return": 3741.340692138672,
+      "episodes": 10,
+      "best_released_coverage_sem": 0.0
+    },
+    "left": {
+      "held": 1.0,
+      "extracted": 1.0,
+      "released": 0.9,
+      "early_end": 0.9,
+      "success": 0.9,
+      "best_released_coverage": 0.0,
+      "final_coverage": 0.82265625,
+      "return": 3731.069204711914,
+      "episodes": 10,
+      "best_released_coverage_sem": 0.0
+    },
+    "right": {
+      "held": 1.0,
+      "extracted": 1.0,
+      "released": 1.0,
+      "early_end": 1.0,
+      "success": 1.0,
+      "best_released_coverage": 0.0,
+      "final_coverage": 0.87734375,
+      "return": 4211.927563476563,
+      "episodes": 10,
+      "best_released_coverage_sem": 0.0
+    }
+  }
+}

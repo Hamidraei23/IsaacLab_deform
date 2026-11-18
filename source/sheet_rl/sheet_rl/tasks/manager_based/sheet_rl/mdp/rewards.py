@@ -164,8 +164,11 @@ def _last_coverage(env: ManagerBasedRLEnv) -> torch.Tensor:
     return state
 
 
+from .gripper_geometry import finger_half_width, pad_positions
+
+
 def _closing_squareness(
-    robot: Articulation, slot: RigidObject, left_id: int, right_id: int
+    robot: Articulation, slot: RigidObject, left_id: int, right_id: int, pads=None
 ) -> torch.Tensor:
     """How square the fingers' closing axis is to the slot, in [0, 1].
 
@@ -182,7 +185,8 @@ def _closing_squareness(
     unit_y = torch.tensor([0.0, 1.0, 0.0], device=robot.device).expand(robot.num_instances, 3)
     lateral = quat_apply(slot.data.root_quat_w.torch, unit_y)
     bodies = robot.data.body_link_pose_w.torch
-    closing = bodies[:, right_id, :3] - bodies[:, left_id, :3]
+    closing = (bodies[:, right_id, :3] - bodies[:, left_id, :3]
+               if pads is None else pads[:, 1] - pads[:, 0])
     closing = closing / closing.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     return (closing * lateral).sum(-1).abs()
 
@@ -542,6 +546,7 @@ def ee_table_clearance(
     hand_body_name: str = "panda_hand",
     grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.1034),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    phase_one_only: bool = False,
 ) -> torch.Tensor:
     """Penalty, in [0, 1], that grows as the fingertips drop towards the table.
 
@@ -557,7 +562,8 @@ def ee_table_clearance(
     Measured from the grasp frame rather than the hand, since the fingertips reach lowest.
     """
     tip, _ = _grasp_site(env, robot_cfg, hand_body_name, grasp_offset)
-    return ((floor - tip[:, 2]) / floor).clamp(min=0.0)
+    penalty = ((floor - tip[:, 2]) / floor).clamp(min=0.0)
+    return penalty * (~_phase_reached(env) if phase_one_only else 1.0)
 
 
 def ee_speed_penalty(
@@ -568,6 +574,7 @@ def ee_speed_penalty(
     hand_body_name: str = "panda_hand",
     max_penalty: float | None = None,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    phase_one_only: bool = False,
 ) -> torch.Tensor:
     """Charge for how fast the hand travels, rising exponentially past a free allowance.
 
@@ -614,7 +621,62 @@ def ee_speed_penalty(
     penalty = torch.expm1(rate * excess)
     if max_penalty is not None:
         penalty = penalty.clamp(max=max_penalty)
+    if phase_one_only:
+        penalty = torch.where(_phase_reached(env), 0.0, penalty)
     return penalty / env.step_dt
+
+
+class ee_motion_while_closing(ManagerTermBase):
+    """Strongly penalize end-effector translation and rotation while the fingers close.
+
+    The gate opens when the binary gripper action commands closing and remains open until the
+    measured finger width reaches :paramref:`closed_threshold`. This directly asks the arm to hold
+    its grasp pose while the pads travel onto the cloth. Using measured closure for the end of the
+    interval matters: ending the penalty on the command edge would permit the arm to move during
+    the several simulation steps in which the fingers are still physically closing.
+
+    Linear and angular speed use an L1 magnitude. Unlike a squared penalty, its gradient does not
+    collapse near zero, which makes even small pose drift costly during the pinch. Angular speed is
+    converted to an equivalent tip speed with :paramref:`angular_scale` metres/radian.
+
+    The returned value is divided by ``step_dt``, so the configured reward weight is the literal
+    charge per control step for one unit of equivalent speed.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        params = cfg.params
+        self._robot: Articulation = env.scene[params["robot_cfg"].name]
+        self._hand_id = self._robot.body_names.index(params.get("hand_body_name", "panda_hand"))
+        action = env.action_manager.get_term(params.get("action_term_name", "gripper_action"))
+        self._action = action
+        self._threshold = float(action.cfg.threshold)
+        self._positive_is_open = bool(action.cfg.positive_threshold)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        closed_threshold: float = 0.012,
+        linear_scale: float = 1.0,
+        angular_scale: float = 0.1,
+        hand_body_name: str = "panda_hand",
+        action_term_name: str = "gripper_action",
+        robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+        finger_cfg: SceneEntityCfg = SceneEntityCfg(
+            "robot", joint_names="panda_finger_joint.*"
+        ),
+    ) -> torch.Tensor:
+        del hand_body_name, action_term_name, robot_cfg
+        raw = self._action.raw_actions[:, 0]
+        open_commanded = raw > self._threshold if self._positive_is_open else raw < self._threshold
+        finger_width = finger_half_width(env, finger_cfg)
+        closing = ~open_commanded & (finger_width > closed_threshold)
+
+        velocity = self._robot.data.body_link_vel_w.torch[:, self._hand_id]
+        linear_speed = velocity[:, :3].norm(dim=-1)
+        angular_speed = velocity[:, 3:6].norm(dim=-1)
+        equivalent_speed = linear_scale * linear_speed + angular_scale * angular_speed
+        return closing.float() * equivalent_speed / env.step_dt
 
 
 def grasp_alignment(
@@ -882,13 +944,28 @@ def sheet_extracted(env: ManagerBasedRLEnv) -> torch.Tensor:
     return _phase_reached(env)
 
 
+def exponential_progress_potential(progress: torch.Tensor, sharpness: float) -> torch.Tensor:
+    """Map normalized progress to a normalized exponential potential.
+
+    The endpoints remain exactly zero and one, so changing ``sharpness`` changes where the reward
+    is paid without changing the total reward budget. A positive value makes later progress worth
+    increasingly more. Zero recovers the original linear potential.
+    """
+    progress = progress.clamp(0.0, 1.0)
+    if abs(sharpness) < 1e-8:
+        return progress
+    return torch.expm1(progress * sharpness) / math.expm1(sharpness)
+
+
 class sheet_lift_progress(ManagerTermBase):
     """Potential-based shaping that leads the policy up to the extraction bonus.
 
     Pays the *change* in a height potential rather than the height itself. The potential ramps
-    linearly from 0 at the sheet's spawn height to 1 once its centre has risen
-    :paramref:`lift_span` metres, and the reward each step is :paramref:`max_reward` times how much
-    that potential grew. Since the increments telescope, an episode collects
+    from 0 at the sheet's spawn height to 1 once its centre has risen :paramref:`lift_span` metres.
+    With a positive :paramref:`exponential_sharpness`, the potential is a normalized exponential,
+    so each additional part of the pull pays more than the previous part and completing the lift
+    remains the most valuable progress. The reward each step is :paramref:`max_reward` times how
+    much that potential grew. Since the increments telescope, an episode collects
     ``max_reward * potential`` in total no matter how slowly it climbs -- so
     :paramref:`max_reward` is the *whole* payout for a full lift, not a per-step rate.
 
@@ -909,6 +986,8 @@ class sheet_lift_progress(ManagerTermBase):
         env: The environment.
         lift_span: Rise at which the potential reaches 1 [m].
         max_reward: Total paid over a full lift from the spawn height to :paramref:`lift_span`.
+        exponential_sharpness: Curvature of the normalized exponential potential. Zero is linear;
+            positive values back-load reward toward a completed pull.
         asset_cfg: The deformable sheet.
     """
 
@@ -934,6 +1013,7 @@ class sheet_lift_progress(ManagerTermBase):
         env: ManagerBasedRLEnv,
         lift_span: float = 0.15,
         max_reward: float = 1000.0,
+        exponential_sharpness: float = 0.0,
         asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
     ) -> torch.Tensor:
         # measured against the sheet's own spawn height rather than a hardcoded number, so it stays
@@ -942,7 +1022,8 @@ class sheet_lift_progress(ManagerTermBase):
         rise = (self._sheet.data.root_pos_w.torch[:, 2] - spawn_height).clamp(min=0.0)
         # only upward motion counts: raw distance from the spawn pose would pay just as well for
         # dragging the sheet sideways out of the slot
-        potential = (rise / lift_span).clamp(max=1.0)
+        progress = (rise / lift_span).clamp(max=1.0)
+        potential = exponential_progress_potential(progress, exponential_sharpness)
         self._best_rise = torch.maximum(self._best_rise, rise)
 
         delta = potential - self._prev
@@ -1093,11 +1174,13 @@ class grasp_stage_reward(ManagerTermBase):
         capture_radius: float = 0.04,
         open_threshold: float = 0.030,
         closed_threshold: float = 0.012,
+        min_hold_width: float = 0.0,
         first_grasp_bonus: float = 200.0,
         bad_closure_penalty: float = 20.0,
         premature_release_penalty: float = 500.0,
         slot_clear_height: float = 0.17,
         extraction_bonus: float = 1000.0,
+        phase_one_only: bool = False,
     ) -> torch.Tensor:
         nodes = self._sheet.data.nodal_pos_w.torch
         tip, hand_quat = self._grasp_frame(grasp_offset)
@@ -1111,12 +1194,15 @@ class grasp_stage_reward(ManagerTermBase):
 
         # read the joint ids at call time: the manager resolves SceneEntityCfg indices after the
         # term is constructed, so anything captured in __init__ is still the unresolved slice(None)
-        width = self._robot.data.joint_pos.torch[:, finger_cfg.joint_ids].mean(dim=1)
+        width = finger_half_width(env, finger_cfg)
         is_open = width > open_threshold
         is_closed = width < closed_threshold
 
-        # -- the whole definition of a grasp: shut, with cloth between the pads
-        holding = is_closed & (sheet_dist < capture_radius)
+        # -- the whole definition of a grasp: shut, with cloth between the pads. ``min_hold_width``
+        # (platform tasks: 1 mm) rejects fully shut fingers merely touching the sheet: a real pinch
+        # stops at about 2 mm (the cloth's particle radius), an empty gripper at 0. Without it a
+        # policy trained from scratch approached with the gripper shut and scored every "grasp".
+        holding = is_closed & (width > min_hold_width) & (sheet_dist < capture_radius)
         hit = holding & (top_dist < capture_radius) & ~self._grasped
 
         closed_now = self._was_open & is_closed
@@ -1126,6 +1212,9 @@ class grasp_stage_reward(ManagerTermBase):
         reward = first_grasp_bonus * hit.float() - bad_closure_penalty * bad_closure.float()
 
         phase = _phase_reached(env)
+        if phase_one_only:
+            # The detector still updates after extraction; only its reward stops.
+            reward = reward * ~phase
         # letting go before the sheet is out of the slot; the matching termination reads this flag
         early = self._holding & is_open & ~phase
         reward = reward - premature_release_penalty * early.float()
@@ -1137,7 +1226,8 @@ class grasp_stage_reward(ManagerTermBase):
         approach_z = quat_apply(hand_quat, unit_z)[:, 2]
         downward = 0.5 * (1.0 - approach_z)
         slot = env.scene[slot_cfg.name]
-        squareness = _closing_squareness(self._robot, slot, self._left_id, self._right_id)
+        squareness = _closing_squareness(self._robot, slot, self._left_id, self._right_id,
+                                          pad_positions(env, self._robot))
         dist_to_edge = (tip - center).norm(dim=-1)
 
         # -- latch state for the next step

@@ -1,0 +1,42 @@
+{
+  "placement_880_drape_v2/model_2800": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/placement_880_drape_v2/model_2800.pt",
+    "episodes": 8,
+    "extracted": 1.0,
+    "released": 0.0,
+    "high_releases_per_episode": 0.0,
+    "aborted": 1.0,
+    "success": 0.0,
+    "best_coverage": 0.0,
+    "center_progress": 0.009134583175182343,
+    "episode_seconds": 0.9083333611488342,
+    "return": 5346.193120926619,
+    "terms": {
+      "table_clearance": 0.0,
+      "ee_speed": 0.0,
+      "grasp_stage": 210.00003051757812,
+      "grasp_progress": 97.91873931884766,
+      "lift_milestones": 5399.0625,
+      "gripper_closures": 0.0,
+      "motion_cost": -361.2418212890625,
+      "placement": 0.4536723792552948
+    },
+    "placement_parts": {
+      "approach": 0.18752366304397583,
+      "lower": 0.12485381960868835,
+      "coverage_progress": 0.0,
+      "opening_progress": 0.14129486680030823,
+      "release": 0.0,
+      "released_coverage_progress": 0.0,
+      "released_coverage": 0.0,
+      "success": 0.0,
+      "off_target": 0.0,
+      "retreat_progress": 0.0,
+      "retreat_distance": 0.0,
+      "retreat_motion": 0.0
+    },
+    "endings": {
+      "released_high": 8
+    }
+  }
+}

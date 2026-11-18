@@ -1,0 +1,15 @@
+{
+  "student": "logs/rsl_rl/sheet_platform_twist/cloth_ppo_v3/model_1350.pt",
+  "edge": "right",
+  "result": {
+    "held": 0.40310077519379844,
+    "extracted": 0.0,
+    "released": 0.0,
+    "early_end": 0.12403100775193798,
+    "best_released_coverage": 0.0,
+    "final_coverage": 0.0010295542635658916,
+    "return": -43.414225564215535,
+    "episodes": 129,
+    "best_released_coverage_sem": 0.0
+  }
+}

@@ -11,9 +11,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from .gripper_geometry import pad_positions
+
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply_inverse
 
+from .platform import FIXED_SHEET_POSITION
 from .rewards import _drape_success, _early_release, _high_release, _table_drop
 
 if TYPE_CHECKING:
@@ -41,9 +44,9 @@ def released_too_high(env: ManagerBasedRLEnv) -> torch.Tensor:
 
     Warning:
         Not registered in :class:`~..sheet_rl_env_cfg.SheetTerminationsCfg`. A high release is
-        charged by :class:`~.rewards.release_stage_reward` and the episode carries on. Kept because
-        the flag it reads is still maintained and wiring it back is a one-line change, but nothing
-        calls this today.
+        charged by :class:`~.rewards.release_stage_reward` and the episode carries on. The platform
+        placement task does register it: there ``platform_placement`` sets the flag when the
+        fingertips are above ``max_release_height`` at release.
 
     The argument for ending here was that a sheet dropped from height lands wherever it falls, so
     the placement reward that follows is decided by luck rather than by anything the policy did.
@@ -141,9 +144,11 @@ def finger_in_slot(
 
     limits = torch.tensor(half_extents, device=centre.device) + margin
     inside = torch.zeros(env.num_envs, dtype=torch.bool, device=centre.device)
-    for name in finger_body_names:
+    pads = pad_positions(env, robot)
+    for i, name in enumerate(finger_body_names):
         body_id = robot.body_names.index(name)
-        offset = robot.data.body_link_pose_w.torch[:, body_id, :3] - centre
+        point = robot.data.body_link_pose_w.torch[:, body_id, :3] if pads is None else pads[:, i]
+        offset = point - centre
         local = quat_apply_inverse(quat, offset)
         inside |= (local.abs() < limits).all(dim=-1)
     return inside
@@ -193,3 +198,34 @@ def simulation_diverged(
     bad |= ~torch.isfinite(robot.data.joint_pos).flatten(1).all(dim=1)
     bad |= ~torch.isfinite(robot.data.joint_vel).flatten(1).all(dim=1)
     return bad
+
+
+def deformable_outside_layout_bounds(
+    env: ManagerBasedRLEnv,
+    x_bounds: tuple[float, float],
+    y_bounds: tuple[float, float],
+    z_bounds: tuple[float, float],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
+    layout_event: str = "reset_layout",
+) -> torch.Tensor:
+    """The inherited ``deformable_outside_bounds`` box, grown to cover a moved layout.
+
+    That term's box is fixed in the environment frame (``x 0-1, y +-0.5, z -0.02-1``), sized around the sheet's
+    default reset position. Move the sheet and its slot for a run
+    (``env.events.reset_layout.params.fixed_sheet_position``) and the policy's carry -- it sweeps the sheet
+    sideways on its way to the platform -- crosses a wall, ending an episode that looks fine (found 2026-11-03:
+    +0.2 m in y, the sheet's far edge passed y = 0.5 at step 192). Here the x and y bounds are the union of the
+    default box and the same box shifted by the layout event's fixed sheet position relative to the default: the
+    box grows toward the moved sheet and still covers the platform, which does not move with it (a box that only
+    slid with the sheet lost the platform side: moved -0.2 m, the carry crossed its y = 0.3 wall instead). It is
+    the same box when the sheet is where it always was. z is left as given: it catches drops off the table.
+    """
+    asset = env.scene[asset_cfg.name]
+    fixed = env.event_manager.get_term_cfg(layout_event).params.get("fixed_sheet_position", FIXED_SHEET_POSITION)
+    shift_x, shift_y = fixed[0] - FIXED_SHEET_POSITION[0], fixed[1] - FIXED_SHEET_POSITION[1]
+    nodal_pos = asset.data.nodal_pos_w.torch - env.scene.env_origins.unsqueeze(1)
+    lower = torch.tensor([x_bounds[0] + min(shift_x, 0.), y_bounds[0] + min(shift_y, 0.), z_bounds[0]],
+                         device=nodal_pos.device)
+    upper = torch.tensor([x_bounds[1] + max(shift_x, 0.), y_bounds[1] + max(shift_y, 0.), z_bounds[1]],
+                         device=nodal_pos.device)
+    return ((nodal_pos < lower) | (nodal_pos > upper)).flatten(1).any(dim=1)

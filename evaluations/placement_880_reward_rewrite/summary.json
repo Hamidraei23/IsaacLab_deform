@@ -1,0 +1,39 @@
+{
+  "2026-09-24_21-17-54_placement_from_v7b_closure/model_880": {
+    "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_grasp/2026-09-24_21-17-54_placement_from_v7b_closure/model_880.pt",
+    "episodes": 16,
+    "extracted": 1.0,
+    "released": 0.5,
+    "high_releases_per_episode": 0.5,
+    "aborted": 0.0,
+    "success": 0.0,
+    "best_coverage": 0.03759765625,
+    "center_progress": 0.38521140813827515,
+    "episode_seconds": 31.75833511352539,
+    "return": 5768.915374755859,
+    "terms": {
+      "table_clearance": 0.0,
+      "ee_speed": 0.0,
+      "grasp_stage": 210.00003051757812,
+      "grasp_progress": 103.01251220703125,
+      "lift_milestones": 5398.56298828125,
+      "gripper_closures": 0.0,
+      "motion_cost": -176.78236389160156,
+      "placement": 234.12220764160156
+    },
+    "placement_parts": {
+      "approach": 50.756141662597656,
+      "lower": 1.4481465816497803,
+      "coverage_progress": 56.396484375,
+      "opening_progress": 0.05887756869196892,
+      "release": 0.5870570540428162,
+      "released_coverage_progress": 37.59765625,
+      "released_coverage": 87.27783203125,
+      "success": 0.0
+    },
+    "endings": {
+      "time_out": 15,
+      "ee_below_table": 1
+    }
+  }
+}

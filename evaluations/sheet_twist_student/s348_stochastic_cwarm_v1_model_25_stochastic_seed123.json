@@ -1,0 +1,19 @@
+{
+  "student": "logs/rsl_rl/sheet_platform_twist/s348_stochastic_cwarm_v1/model_25.pt",
+  "edge": "right",
+  "task": "Template-Sheet-Rl-Platform-TwistStudent-v0",
+  "seed": 123,
+  "stochastic": true,
+  "result": {
+    "held": 1.0,
+    "extracted": 0.98046875,
+    "released": 0.50390625,
+    "early_end": 0.93359375,
+    "success": 0.30859375,
+    "best_released_coverage": 0.15948486328125,
+    "final_coverage": 0.16790771484375,
+    "return": 244.49883849918842,
+    "episodes": 256,
+    "best_released_coverage_sem": 0.015463850254379343
+  }
+}

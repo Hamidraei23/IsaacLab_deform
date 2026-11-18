@@ -18,9 +18,9 @@ therefore mean newtons here.
 
 **Scale, so the number is not a surprise.** The sheet is 0.2 x 0.2 m at 10 kg/m^2, so it weighs
 0.4 kg -- 3.9 N -- spread over 81 nodes, which puts one node's own weight at about 0.05 N. The
-default 5 N on one node is therefore about 1.3 times the weight of the whole sheet and a hundred
-times the weight of the node it is applied to. That is a decisive yank, not a nudge; ``env.push.force``
-is the knob if it turns out to be too much.
+default 3 N on one node is therefore about three quarters of the weight of the whole sheet and
+sixty times the weight of the node it is applied to. That is a real disturbance rather than a
+nudge; ``env.push.force`` is the knob if it turns out to be too much or too little.
 
 **Why the constructor runs before the environment's.** The callback has to be registered before the
 solver's CUDA graph is captured, and capture happens inside ``ManagerBasedEnv.__init__``. Registering
@@ -53,15 +53,6 @@ if TYPE_CHECKING:
     from .sheet_edge_marker import SheetEdgeMarker
 
 
-BIND_GIVE_UP_STEPS = 300
-"""Steps to keep looking for a viewer window before saying the key is dead [steps].
-
-Ten seconds at the 30 Hz control rate. The viewer is built lazily, so the first few steps legitimately
-find nothing and a warning printed immediately would be wrong; a run that is genuinely headless, or
-on ``--viz rerun``, never finds one and should say so rather than leaving a key that does nothing.
-"""
-
-
 @configclass
 class SheetPushCfg:
     """What the key does when it is pressed.
@@ -74,26 +65,28 @@ class SheetPushCfg:
     """Bind the key at all. Off leaves the environment exactly as it was."""
 
     key: str = "X"
-    """Which key fires the push, as a :mod:`pyglet.window.key` name -- ``X``, ``K``, ``F1``.
+    """Which key fires the push -- ``X``, ``K``, ``F1``. Bound by :class:`~.sheet_keys.ViewerKeys`,
+    which reaches whichever viewer is running.
 
     ``X`` is unbound in Newton's viewer, so nothing is being taken over here. Avoid ``SPACE`` (pause
     rendering), ``H`` (hide UI), ``F`` (frame camera) and the ``WASDQE``/arrow camera keys.
     """
 
-    force: float = 5.0
+    force: float = 3.0
     """Magnitude of the force applied to the node [N].
 
     This is the length of the vector, not a per-axis figure: with the default :attr:`lift` the force
-    is 3.54 N along y and 3.54 N along z, which together come to 5. See the module docstring for
-    what 5 N means next to a 3.9 N sheet.
+    is 2.12 N along y and 2.12 N along z, which together come to 3. See the module docstring for
+    what 3 N means next to a 3.9 N sheet.
     """
 
-    duration_s: float = 0.25
+    duration_s: float = 0.15
     """How long the force is held [s].
 
-    Rounded to whole control steps, so at 30 Hz the default is 8 steps. The force is applied on
-    every solver substep within them, not once per control step, so this really is a force held for
-    a quarter of a second rather than a train of impulses.
+    Rounded to whole control steps, so the figure actually applied is a multiple of 33 ms: 0.15 s is
+    4.5 steps at 30 Hz and lands on 4, a held 0.13 s. The force is applied on every solver substep
+    within those steps, not once per control step, so this really is a force held for an eighth of a
+    second rather than a train of impulses.
     """
 
     direction: str = "random"
@@ -115,7 +108,36 @@ class SheetPushCfg:
 
     verbose: bool = True
     """Print a line per press, so a push that produced little visible motion can still be seen to
-    have registered."""
+    have registered.
+
+    Only key presses are announced. The automatic push below fires on a per-environment schedule
+    over a thousand environments and would print several times a second, so it stays quiet and is
+    reported through ``Events/pushed_frac`` in the training log instead.
+    """
+
+    on_extraction: bool = False
+    """Push automatically, the instant the sheet is pulled clear of the slot.
+
+    Off by default, which leaves the key as the only trigger and the environment exactly as it was.
+    Armed by ``--push`` on the training command, which is what makes the push part of the *task*
+    rather than a probe: the policy meets it during training and has to hold on through it.
+
+    Fires at most once per episode, on the step the extraction latch is first set, and only in the
+    fraction of episodes given by :attr:`on_extraction_probability`. Same force, direction and
+    duration as a key press -- it is the same machinery, aimed by the same latched marker.
+    """
+
+    on_extraction_probability: float = 0.5
+    """Fraction of *extracting* episodes that get the automatic push.
+
+    Half, so the same policy update sees both: an extraction that is disturbed and one that is not.
+    The unpushed half is the control -- without it a policy could only learn that extraction is
+    always followed by a yank, and there would be nothing to compare against.
+
+    Drawn per environment at reset, before it is known whether the episode will extract at all, so
+    the coin cannot depend on how the episode went. The share of *all* episodes that end up pushed
+    is therefore this figure times the extraction rate, and is logged as ``Events/pushed_frac``.
+    """
 
 
 @wp.kernel
@@ -134,21 +156,6 @@ def _add_particle_force(
     p = particle_index[i]
     if p >= 0:
         wp.atomic_add(particle_f, p, force[i])
-
-
-def _resolve_gl_window(env: ManagerBasedRLEnv) -> tuple[object, object] | None:
-    """The Newton GL viewer and its pyglet window, or ``None`` while there is no such window.
-
-    Returns ``None`` rather than raising for every reason there might not be one: a headless run, a
-    visualizer that is not Newton's, or simply a viewer that has not been built yet -- it is created
-    lazily on the first render, which is after this is first asked.
-    """
-    for visualizer in getattr(getattr(env, "sim", None), "visualizers", None) or []:
-        viewer = getattr(visualizer, "_viewer", None)
-        window = getattr(getattr(viewer, "renderer", None), "window", None)
-        if window is not None and hasattr(window, "push_handlers"):
-            return viewer, window
-    return None
 
 
 class SheetPusher:
@@ -199,8 +206,6 @@ class SheetPusher:
         self._hold_steps = 1
 
         self._presses = 0
-        self._bound = False
-        self._bind_attempts = 0
         # Start alternation with +y.
         self._alternate = -1.0
 
@@ -246,6 +251,21 @@ class SheetPusher:
             return
         self._start(torch.full((self._num_envs,), float(sign), device=self._device))
 
+    def request_envs(self, envs: torch.Tensor) -> None:
+        """Start a push on the selected environments only, leaving every other one alone.
+
+        This is what the automatic push uses: extraction happens at a different moment in each
+        environment, so the force has to be armed per environment rather than across the batch the
+        way a key press does it. Direction is drawn as configured, so ``random`` still gives each
+        environment its own sign.
+
+        Args:
+            envs: Boolean mask over environments. Shape ``(num_envs,)``.
+        """
+        if not bool(envs.any()):
+            return
+        self._start(self._draw_sign(), envs=envs)
+
     def clear(self, dones: torch.Tensor) -> None:
         """Drop any push still owed to an environment that has just reset.
 
@@ -256,13 +276,11 @@ class SheetPusher:
             self._remaining = torch.where(dones, torch.zeros_like(self._remaining), self._remaining)
 
     def update(self) -> None:
-        """Bind the key if it is not yet bound, start any requested push, and refresh the arrays.
+        """Start any requested push and refresh the arrays.
 
         Call it after the marker's own update, so the target node is the one the dot was just drawn
         on rather than the one it was on last step.
         """
-        self._ensure_bound()
-
         while self._presses:
             self._presses -= 1
             self._start(self._draw_sign())
@@ -315,66 +333,35 @@ class SheetPusher:
             return torch.full((num_envs,), self._alternate, device=device)
         return torch.full((num_envs,), 1.0 if self.cfg.direction == "+y" else -1.0, device=device)
 
-    def _start(self, sign: torch.Tensor) -> None:
-        """Arm the push over every environment.
+    def _start(self, sign: torch.Tensor, envs: torch.Tensor | None = None) -> None:
+        """Arm the push, over every environment or over the given mask.
 
         A press during a push restarts its clock rather than stacking with it, so holding the key
         down cannot accumulate into a force larger than the one configured.
+
+        Args:
+            sign: Which way along y, per environment.
+            envs: Boolean mask of environments to arm, or ``None`` for all of them. Environments
+                outside the mask keep whatever push they already had.
         """
         direction = torch.zeros(self._num_envs, 3, device=self._device)
         direction[:, 1] = sign
         direction[:, 2] = self.cfg.lift
-        self._unit = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        self._remaining = torch.full_like(self._remaining, self._hold_steps)
+        unit = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        held = torch.full_like(self._remaining, self._hold_steps)
 
-        if self.cfg.verbose:
+        if envs is None:
+            self._unit = unit
+            self._remaining = held
+        else:
+            self._unit = torch.where(envs.unsqueeze(1), unit, self._unit)
+            self._remaining = torch.where(envs, held, self._remaining)
+
+        # Only a key press is announced; see ``SheetPushCfg.verbose``.
+        if self.cfg.verbose and envs is None:
             positive = int((sign > 0).sum())
             way = f"{positive} envs +y, {self._num_envs - positive} envs -y"
             print(
                 f"[sheet_rl] push: {way} and +z, {self.cfg.force:.1f} N for"
                 f" {self.cfg.duration_s:.2f} s ({self._hold_steps} steps)"
             )
-
-    def _ensure_bound(self) -> None:
-        """Install the key handler on the viewer's window, once one exists."""
-        if self._bound or self._bind_attempts >= BIND_GIVE_UP_STEPS:
-            return
-
-        resolved = _resolve_gl_window(self.env)
-        if resolved is None:
-            self._bind_attempts += 1
-            if self._bind_attempts == BIND_GIVE_UP_STEPS:
-                # Kitless launches have no logging handler.
-                print(
-                    "[sheet_rl] no Newton GL window found, so the sheet push key is inactive."
-                    " Run with '--viz newton_gl' on a machine with a display to use it."
-                )
-            return
-
-        viewer, window = resolved
-
-        import pyglet
-
-        symbol = getattr(pyglet.window.key, self.cfg.key.upper(), None)
-        if symbol is None:
-            print(f"[sheet_rl] '{self.cfg.key}' is not a pyglet key name; the sheet push is inactive.")
-            self._bind_attempts = BIND_GIVE_UP_STEPS
-            return
-
-        def on_key_press(pressed: int, modifiers: int):
-            if pressed != symbol:
-                return None
-            gui = getattr(viewer, "gui", None)
-            # Let ImGui consume text input.
-            if gui is not None and gui.is_keyboard_capturing():
-                return None
-            self._presses += 1
-            return pyglet.event.EVENT_HANDLED
-
-        # Run first and consume the key event.
-        window.push_handlers(on_key_press=on_key_press)
-        self._bound = True
-        print(
-            f"[sheet_rl] press {self.cfg.key.upper()} in the viewer to push the red dot at"
-            f" {self.cfg.force:.1f} N for {self.cfg.duration_s:.2f} s ({self.cfg.direction} and +z)"
-        )

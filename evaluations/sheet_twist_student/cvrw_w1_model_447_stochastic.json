@@ -1,0 +1,15 @@
+{
+  "student": "logs/rsl_rl/sheet_platform_twist/cvrw_w1/model_447.pt",
+  "edge": "right",
+  "result": {
+    "held": 1.0,
+    "extracted": 0.7421875,
+    "released": 0.515625,
+    "early_end": 0.2421875,
+    "best_released_coverage": 0.036712646484375,
+    "final_coverage": 0.03228759765625,
+    "return": 78.47893183864653,
+    "episodes": 128,
+    "best_released_coverage_sem": 0.01178140704185886
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "task": "Template-Sheet-Rl-Platform-TwistStudent-v0",
+  "teacher": "logs/rsl_rl/sheet_platform_twist/best_deformable_twist/model_2874.pt",
+  "student": "logs/fast_sac/sheet_platform_twist_sac/2026-10-26_10-08-12_par_D2_noanchor_9k/model_75500.pt",
+  "num_envs": 10,
+  "episodes_per_env": 1,
+  "seed": 42,
+  "results": {
+    "student_det": {
+      "episodes": 10,
+      "success": 0.3,
+      "dropped": 0.5,
+      "held_too_low": 0.0,
+      "time_out": 0.1,
+      "other": 0.1,
+      "extracted": 0.4,
+      "return": 634.0221465225331,
+      "length": 256.4,
+      "cov_best": 0.228125,
+      "cov_best_released": 0.0,
+      "cov_final": 0.223046875,
+      "release_angle_min": 21.124789534220056,
+      "agreement_rmse_per_dim_in_teacher_std": [
+        2.752,
+        1.97,
+        2.977,
+        2.258,
+        2.427,
+        2.671,
+        0.648
+      ],
+      "agreement_rmse_in_teacher_std": 2.2433183193206787,
+      "wall_time_s": 55.745229959487915
+    },
+    "student_stoch": {
+      "episodes": 10,
+      "success": 0.4,
+      "dropped": 0.5,
+      "held_too_low": 0.0,
+      "time_out": 0.1,
+      "other": 0.0,
+      "extracted": 0.6,
+      "return": 1641.9455432891846,
+      "length": 229.4,
+      "cov_best": 0.426953125,
+      "cov_best_released": 0.0,
+      "cov_final": 0.41640625,
+      "release_angle_min": 19.033152998995877,
+      "agreement_rmse_per_dim_in_teacher_std": [
+        3.345,
+        2.642,
+        4.398,
+        2.367,
+        2.928,
+        2.66,
+        0.674
+      ],
+      "agreement_rmse_in_teacher_std": 2.71601939201355,
+      "wall_time_s": 55.64641213417053
+    }
+  }
+}

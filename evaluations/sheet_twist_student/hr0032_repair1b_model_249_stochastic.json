@@ -1,0 +1,15 @@
+{
+  "student": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_platform_twist/hr0032_repair1b/model_249.pt",
+  "edge": "right",
+  "result": {
+    "held": 1.0,
+    "extracted": 0.703125,
+    "released": 0.53125,
+    "early_end": 0.0,
+    "best_released_coverage": 0.141204833984375,
+    "final_coverage": 0.184661865234375,
+    "return": 261.07759496569633,
+    "episodes": 128,
+    "best_released_coverage_sem": 0.0239065533772813
+  }
+}

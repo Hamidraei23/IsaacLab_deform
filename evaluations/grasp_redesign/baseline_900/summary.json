@@ -1,0 +1,496 @@
+{
+  "checkpoint": "/home/hami/workspaces/deformable_isaac_ws/sheet_rl/sheet_rl/logs/rsl_rl/sheet_grasp/main_train_grasp/model_900_std06.pt",
+  "seed": 42,
+  "dt": 0.03333333333333333,
+  "episodes": [
+    {
+      "env": 0,
+      "episode": 0,
+      "success": true,
+      "steps": 29,
+      "return": 10606.34375
+    },
+    {
+      "env": 0,
+      "episode": 1,
+      "success": true,
+      "steps": 27,
+      "return": 11071.2646484375
+    },
+    {
+      "env": 1,
+      "episode": 0,
+      "success": true,
+      "steps": 31,
+      "return": 10926.0361328125
+    },
+    {
+      "env": 1,
+      "episode": 1,
+      "success": true,
+      "steps": 27,
+      "return": 11341.07421875
+    },
+    {
+      "env": 2,
+      "episode": 0,
+      "success": true,
+      "steps": 27,
+      "return": 10393.380859375
+    },
+    {
+      "env": 2,
+      "episode": 1,
+      "success": true,
+      "steps": 26,
+      "return": 11073.0927734375
+    },
+    {
+      "env": 3,
+      "episode": 0,
+      "success": true,
+      "steps": 42,
+      "return": 9245.1220703125
+    },
+    {
+      "env": 3,
+      "episode": 1,
+      "success": true,
+      "steps": 24,
+      "return": 10679.244140625
+    },
+    {
+      "env": 4,
+      "episode": 0,
+      "success": true,
+      "steps": 41,
+      "return": 9187.0576171875
+    },
+    {
+      "env": 4,
+      "episode": 1,
+      "success": true,
+      "steps": 29,
+      "return": 10874.1826171875
+    },
+    {
+      "env": 5,
+      "episode": 0,
+      "success": true,
+      "steps": 31,
+      "return": 10718.5478515625
+    },
+    {
+      "env": 5,
+      "episode": 1,
+      "success": true,
+      "steps": 30,
+      "return": 10690.619140625
+    },
+    {
+      "env": 6,
+      "episode": 0,
+      "success": true,
+      "steps": 26,
+      "return": 11272.8623046875
+    },
+    {
+      "env": 6,
+      "episode": 1,
+      "success": true,
+      "steps": 28,
+      "return": 10998.1416015625
+    },
+    {
+      "env": 7,
+      "episode": 0,
+      "success": true,
+      "steps": 23,
+      "return": 11218.8349609375
+    },
+    {
+      "env": 7,
+      "episode": 1,
+      "success": true,
+      "steps": 26,
+      "return": 11056.3984375
+    },
+    {
+      "env": 8,
+      "episode": 0,
+      "success": true,
+      "steps": 24,
+      "return": 10154.1103515625
+    },
+    {
+      "env": 8,
+      "episode": 1,
+      "success": true,
+      "steps": 28,
+      "return": 10684.9248046875
+    },
+    {
+      "env": 9,
+      "episode": 0,
+      "success": true,
+      "steps": 28,
+      "return": 10454.970703125
+    },
+    {
+      "env": 9,
+      "episode": 1,
+      "success": true,
+      "steps": 25,
+      "return": 11241.95703125
+    },
+    {
+      "env": 10,
+      "episode": 0,
+      "success": true,
+      "steps": 29,
+      "return": 10882.37109375
+    },
+    {
+      "env": 10,
+      "episode": 1,
+      "success": true,
+      "steps": 42,
+      "return": 9515.0009765625
+    },
+    {
+      "env": 11,
+      "episode": 0,
+      "success": true,
+      "steps": 26,
+      "return": 11362.63671875
+    },
+    {
+      "env": 11,
+      "episode": 1,
+      "success": true,
+      "steps": 30,
+      "return": 10713.392578125
+    },
+    {
+      "env": 12,
+      "episode": 0,
+      "success": true,
+      "steps": 31,
+      "return": 9747.4609375
+    },
+    {
+      "env": 12,
+      "episode": 1,
+      "success": true,
+      "steps": 30,
+      "return": 10720.8603515625
+    },
+    {
+      "env": 13,
+      "episode": 0,
+      "success": true,
+      "steps": 26,
+      "return": 11119.3671875
+    },
+    {
+      "env": 13,
+      "episode": 1,
+      "success": true,
+      "steps": 29,
+      "return": 11166.7998046875
+    },
+    {
+      "env": 14,
+      "episode": 0,
+      "success": true,
+      "steps": 24,
+      "return": 10681.705078125
+    },
+    {
+      "env": 14,
+      "episode": 1,
+      "success": true,
+      "steps": 45,
+      "return": 10316.16796875
+    },
+    {
+      "env": 15,
+      "episode": 0,
+      "success": true,
+      "steps": 26,
+      "return": 10198.3583984375
+    },
+    {
+      "env": 15,
+      "episode": 1,
+      "success": true,
+      "steps": 27,
+      "return": 11379.71484375
+    },
+    {
+      "env": 16,
+      "episode": 0,
+      "success": true,
+      "steps": 25,
+      "return": 11414.240234375
+    },
+    {
+      "env": 16,
+      "episode": 1,
+      "success": true,
+      "steps": 27,
+      "return": 11295.087890625
+    },
+    {
+      "env": 17,
+      "episode": 0,
+      "success": true,
+      "steps": 24,
+      "return": 11198.37890625
+    },
+    {
+      "env": 17,
+      "episode": 1,
+      "success": true,
+      "steps": 25,
+      "return": 10287.8037109375
+    },
+    {
+      "env": 18,
+      "episode": 0,
+      "success": true,
+      "steps": 27,
+      "return": 11090.8701171875
+    },
+    {
+      "env": 18,
+      "episode": 1,
+      "success": true,
+      "steps": 31,
+      "return": 10937.9833984375
+    },
+    {
+      "env": 19,
+      "episode": 0,
+      "success": true,
+      "steps": 30,
+      "return": 10662.56640625
+    },
+    {
+      "env": 19,
+      "episode": 1,
+      "success": true,
+      "steps": 28,
+      "return": 10710.2705078125
+    },
+    {
+      "env": 20,
+      "episode": 0,
+      "success": true,
+      "steps": 44,
+      "return": 8923.51953125
+    },
+    {
+      "env": 20,
+      "episode": 1,
+      "success": true,
+      "steps": 26,
+      "return": 11331.87109375
+    },
+    {
+      "env": 21,
+      "episode": 0,
+      "success": true,
+      "steps": 27,
+      "return": 11193.8017578125
+    },
+    {
+      "env": 21,
+      "episode": 1,
+      "success": true,
+      "steps": 39,
+      "return": 10158.029296875
+    },
+    {
+      "env": 22,
+      "episode": 0,
+      "success": true,
+      "steps": 29,
+      "return": 10435.5419921875
+    },
+    {
+      "env": 22,
+      "episode": 1,
+      "success": true,
+      "steps": 26,
+      "return": 11276.77734375
+    },
+    {
+      "env": 23,
+      "episode": 0,
+      "success": true,
+      "steps": 26,
+      "return": 11211.953125
+    },
+    {
+      "env": 23,
+      "episode": 1,
+      "success": true,
+      "steps": 26,
+      "return": 10666.529296875
+    },
+    {
+      "env": 24,
+      "episode": 0,
+      "success": true,
+      "steps": 27,
+      "return": 10823.953125
+    },
+    {
+      "env": 24,
+      "episode": 1,
+      "success": true,
+      "steps": 30,
+      "return": 10727.73828125
+    },
+    {
+      "env": 25,
+      "episode": 0,
+      "success": true,
+      "steps": 31,
+      "return": 9934.37109375
+    },
+    {
+      "env": 25,
+      "episode": 1,
+      "success": true,
+      "steps": 28,
+      "return": 10767.25
+    },
+    {
+      "env": 26,
+      "episode": 0,
+      "success": true,
+      "steps": 28,
+      "return": 11048.365234375
+    },
+    {
+      "env": 26,
+      "episode": 1,
+      "success": true,
+      "steps": 24,
+      "return": 10957.0009765625
+    },
+    {
+      "env": 27,
+      "episode": 0,
+      "success": true,
+      "steps": 27,
+      "return": 10641.8837890625
+    },
+    {
+      "env": 27,
+      "episode": 1,
+      "success": true,
+      "steps": 29,
+      "return": 10817.099609375
+    },
+    {
+      "env": 28,
+      "episode": 0,
+      "success": true,
+      "steps": 30,
+      "return": 10643.2431640625
+    },
+    {
+      "env": 28,
+      "episode": 1,
+      "success": true,
+      "steps": 27,
+      "return": 11284.3876953125
+    },
+    {
+      "env": 29,
+      "episode": 0,
+      "success": true,
+      "steps": 27,
+      "return": 10448.826171875
+    },
+    {
+      "env": 29,
+      "episode": 1,
+      "success": true,
+      "steps": 38,
+      "return": 9557.6396484375
+    },
+    {
+      "env": 30,
+      "episode": 0,
+      "success": true,
+      "steps": 38,
+      "return": 10655.9091796875
+    },
+    {
+      "env": 30,
+      "episode": 1,
+      "success": true,
+      "steps": 29,
+      "return": 11043.5712890625
+    },
+    {
+      "env": 31,
+      "episode": 0,
+      "success": true,
+      "steps": 28,
+      "return": 10855.84765625
+    },
+    {
+      "env": 31,
+      "episode": 1,
+      "success": true,
+      "steps": 26,
+      "return": 11108.013671875
+    }
+  ],
+  "success_rate": 1.0,
+  "joint_velocity_p95": 0.8927578926086426,
+  "joint_acceleration_p95": 7.945440292358398,
+  "joint_acceleration_max": 56.653743743896484,
+  "reward_names": [
+    "approach",
+    "alignment",
+    "square_progress",
+    "table_clearance",
+    "ee_speed",
+    "gripper_recommit",
+    "grasp_stage",
+    "lift_progress",
+    "joint_velocity",
+    "joint_acceleration",
+    "action_rate",
+    "ee_motion_during_closure"
+  ],
+  "termination_names": [
+    "time_out",
+    "deformable_out_of_bounds",
+    "ee_below_table",
+    "joint_vel_out_of_limit",
+    "released_early",
+    "finger_touched_slot",
+    "extracted"
+  ],
+  "reward_mean_per_episode": {
+    "approach": 19.036502838134766,
+    "alignment": 13.695548057556152,
+    "square_progress": 22.27204704284668,
+    "table_clearance": 0.0,
+    "ee_speed": 0.0,
+    "gripper_recommit": -193.75001525878906,
+    "grasp_stage": 7000.00048828125,
+    "lift_progress": 4983.8876953125,
+    "joint_velocity": -0.7101541757583618,
+    "joint_acceleration": -7.511573791503906,
+    "action_rate": -9.376249313354492,
+    "ee_motion_during_closure": -1111.8846435546875
+  }
+}

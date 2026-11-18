@@ -1,0 +1,15 @@
+{
+  "student": "logs/rsl_rl/sheet_platform_twist/rigid_dagger_right_v2/model_1000.pt",
+  "edge": "right",
+  "result": {
+    "held": 1.0,
+    "extracted": 0.03125,
+    "released": 0.0234375,
+    "early_end": 0.0078125,
+    "best_released_coverage": 0.00628662109375,
+    "final_coverage": 0.00616455078125,
+    "return": 35.40310329198837,
+    "episodes": 128,
+    "best_released_coverage_sem": 0.00628662109375
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "episodes": 20,
+  "seed": 42,
+  "num_envs": 1,
+  "physics": "PhysxCfg",
+  "visualizer": "newton_gl",
+  "policy_dt_s": 0.02,
+  "episode_limit_s": 5,
+  "success_threshold_m": 0.1,
+  "success_10cm": 13,
+  "success_5cm": 6,
+  "timeouts": 20,
+  "terminated": 0,
+  "final_position_within_10cm": 4,
+  "mean_min_distance_cm": 7.603258220478892,
+  "mean_final_distance_cm": 13.65490833297372,
+  "min_max_cube_height_cm": 39.68769609928131,
+  "logged_success_matches_measured": true
+}
